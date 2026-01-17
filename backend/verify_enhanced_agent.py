@@ -117,7 +117,6 @@ async def run_verification():
             AgentSession.objects.create,
             patient=profile,
             user=user, # Added required user field
-            session_id=str(uuid.uuid4()), # Added required session_id
             started_at=timezone.now(),
             status='ACTIVE'
         )

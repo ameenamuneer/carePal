@@ -7,6 +7,7 @@ from django.db import models
 from django.conf import settings
 from django.utils import timezone
 from patients.models import PatientProfile
+import uuid
 
 
 class AgentSession(models.Model):
@@ -117,6 +118,16 @@ class AgentSession(models.Model):
     
     def __str__(self):
         return f"{self.session_type} - {self.patient.user.get_full_name()} - {self.started_at}"
+    
+    def save(self, *args, **kwargs):
+        """Auto-generate session_id if not provided"""
+        if not self.session_id:
+            # Generate unique session ID
+            timestamp = timezone.now().strftime('%Y%m%d%H%M%S')
+            unique_id = uuid.uuid4().hex[:8]
+            self.session_id = f"session_{timestamp}_{unique_id}"
+        
+        super().save(*args, **kwargs)
     
     def calculate_duration(self):
         """Calculate and save session duration"""
