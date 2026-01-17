@@ -209,3 +209,10 @@ os.makedirs(REPORTS_STORAGE_PATH, exist_ok=True)
 os.makedirs(os.path.join(MEDIA_ROOT, 'reports', 'pdf'), exist_ok=True)
 os.makedirs(os.path.join(MEDIA_ROOT, 'reports', 'excel'), exist_ok=True)
 
+
+# Twilio Configuration
+TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID', '')
+TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN', '')
+TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER', '')
+
+
