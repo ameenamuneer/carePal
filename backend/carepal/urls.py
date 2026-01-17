@@ -31,6 +31,7 @@ urlpatterns = [
     
     path('api/v1/alerts/', include('alerts.urls')),
     path('api/v1/family/', include('family.urls')),
+    path('api/v1/analytics/', include('analytics.urls')),
     
     # Swagger Documentation
     path('api/schema/', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),

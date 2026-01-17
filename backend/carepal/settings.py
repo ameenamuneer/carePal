@@ -186,3 +186,26 @@ ENCRYPTION_KEY = os.getenv('ENCRYPTION_KEY', Fernet.generate_key())
 # OAuth callback URLs (update for production)
 OAUTH_CALLBACK_BASE_URL = os.getenv('OAUTH_CALLBACK_BASE_URL', 'http://localhost:8000')
 
+
+# Google API for Gemini AI
+GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY', '')
+
+# Analytics settings
+ANALYTICS_CACHE_TIMEOUT = 300  # 5 minutes for dashboard cache
+ANALYTICS_ENABLE_AI_INSIGHTS = os.getenv('ANALYTICS_ENABLE_AI_INSIGHTS', 'True').lower() == 'true'
+ANALYTICS_AI_TEMPERATURE = 0.0  # Most deterministic
+
+# Report generation settings
+REPORTS_STORAGE_PATH = os.path.join(BASE_DIR, 'media', 'reports')
+REPORTS_PDF_ENGINE = 'reportlab'  # or 'weasyprint'
+REPORTS_EXCEL_ENGINE = 'openpyxl'
+
+# Media files configuration
+MEDIA_URL = '/media/'
+MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+
+# Ensure media directories exist
+os.makedirs(REPORTS_STORAGE_PATH, exist_ok=True)
+os.makedirs(os.path.join(MEDIA_ROOT, 'reports', 'pdf'), exist_ok=True)
+os.makedirs(os.path.join(MEDIA_ROOT, 'reports', 'excel'), exist_ok=True)
+
