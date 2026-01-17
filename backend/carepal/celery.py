@@ -61,4 +61,42 @@ app.conf.beat_schedule = {
         'task': 'devices.tasks.check_device_health',
         'schedule': crontab(minute=0, hour='*/6'),  # Every 6 hours
     },
+    # Alert Tasks
+    'check-alert-escalation': {
+        'task': 'alerts.tasks.check_alert_escalation',
+        'schedule': crontab(minute='*/5'),  # Every 5 minutes
+    },
+    'expire-old-alerts': {
+        'task': 'alerts.tasks.expire_old_alerts',
+        'schedule': crontab(hour=1, minute=0),  # Daily at 1 AM
+    },
+    'compute-alert-statistics': {
+        'task': 'alerts.tasks.compute_alert_statistics',
+        'schedule': crontab(hour=2, minute=0),  # Daily at 2 AM
+    },
+    'retry-failed-deliveries': {
+        'task': 'alerts.tasks.retry_failed_deliveries',
+        'schedule': crontab(minute='*/15'),  # Every 15 minutes
+    },
+    # Family Tasks
+    'send-care-schedule-reminders': {
+        'task': 'family.tasks.send_care_schedule_reminders',
+        'schedule': crontab(minute='*/15'),  # Every 15 minutes
+    },
+    'check-overdue-schedules': {
+        'task': 'family.tasks.check_overdue_schedules',
+        'schedule': crontab(minute='0', hour='*'),  # Hourly
+    },
+    'expire-old-invitations': {
+        'task': 'family.tasks.expire_old_invitations',
+        'schedule': crontab(hour=0, minute=0),  # Daily at midnight
+    },
+    'send-daily-family-summary': {
+        'task': 'family.tasks.send_daily_family_summary',
+        'schedule': crontab(minute='0', hour='*'),  # Check hourly for configured times
+    },
+    'cleanup-old-activity-logs': {
+        'task': 'family.tasks.cleanup_old_activity_logs',
+        'schedule': crontab(day_of_week='sunday', hour=0, minute=0),  # Weekly
+    },
 }

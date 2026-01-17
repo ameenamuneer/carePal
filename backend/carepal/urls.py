@@ -29,8 +29,11 @@ urlpatterns = [
     path('api/vitals/', include('vitals.urls')),
     path('api/agent/', include('agent.urls')),
     
+    path('api/v1/alerts/', include('alerts.urls')),
+    path('api/v1/family/', include('family.urls')),
+    
     # Swagger Documentation
-    path('swagger/', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),
+    path('api/schema/', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),
     path('redoc/', schema_view.with_ui('redoc', cache_timeout=0), name='schema-redoc'),
 ]
 
