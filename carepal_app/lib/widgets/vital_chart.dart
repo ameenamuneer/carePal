@@ -86,8 +86,9 @@ class VitalChart extends StatelessWidget {
                 reservedSize: 30,
                 getTitlesWidget: (value, meta) {
                   final index = value.toInt();
-                  if (index < 0 || index >= readings.length)
+                  if (index < 0 || index >= readings.length) {
                     return const SizedBox();
+                  }
 
                   final date = readings[index].measuredAt;
                   return Padding(
@@ -205,8 +206,9 @@ class VitalChart extends StatelessWidget {
                 reservedSize: 30,
                 getTitlesWidget: (value, meta) {
                   final index = value.toInt();
-                  if (index < 0 || index >= readings.length)
+                  if (index < 0 || index >= readings.length) {
                     return const SizedBox();
+                  }
 
                   final date = readings[index].measuredAt;
                   return Padding(

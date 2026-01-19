@@ -1,3 +1,20 @@
+// Helper functions for robust numeric parsing
+double _parseDouble(dynamic value) {
+  if (value == null) return 0.0;
+  if (value is double) return value;
+  if (value is int) return value.toDouble();
+  if (value is String) return double.tryParse(value) ?? 0.0;
+  return 0.0;
+}
+
+int _parseInt(dynamic value) {
+  if (value == null) return 0;
+  if (value is int) return value;
+  if (value is double) return value.toInt();
+  if (value is String) return int.tryParse(value) ?? 0;
+  return 0;
+}
+
 class DashboardData {
   final int patientId;
   final String patientName;
@@ -27,7 +44,7 @@ class DashboardData {
 
   factory DashboardData.fromJson(Map<String, dynamic> json) {
     return DashboardData(
-      patientId: json['patient_id'],
+      patientId: _parseInt(json['patient_id']),
       patientName: json['patient_name'],
       healthScore: HealthScore.fromJson(json['health_score']),
       vitalsSummary: (json['vitals_summary'] as Map<String, dynamic>).map(
@@ -40,13 +57,17 @@ class DashboardData {
       riskAssessment: (json['risk_assessment'] as Map<String, dynamic>).map(
         (key, value) => MapEntry(key, RiskAssessment.fromJson(value)),
       ),
-      insights: (json['insights'] as List)
-          .map((i) => Insight.fromJson(i))
-          .toList(),
-      recommendations: (json['recommendations'] as List)
-          .map((r) => Recommendation.fromJson(r))
-          .toList(),
-      dataCompleteness: (json['data_completeness'] as num).toDouble(),
+      insights:
+          (json['insights'] as List?)
+              ?.map((i) => Insight.fromJson(i))
+              .toList() ??
+          [],
+      recommendations:
+          (json['recommendations'] as List?)
+              ?.map((r) => Recommendation.fromJson(r))
+              .toList() ??
+          [],
+      dataCompleteness: _parseDouble(json['data_completeness']),
       lastUpdated: DateTime.parse(json['last_updated']),
     );
   }
@@ -65,7 +86,7 @@ class HealthScore {
 
   factory HealthScore.fromJson(Map<String, dynamic> json) {
     return HealthScore(
-      score: json['score'],
+      score: _parseInt(json['score']),
       category: json['category'],
       trend: json['trend'],
     );
@@ -93,11 +114,11 @@ class VitalSummary {
 
   factory VitalSummary.fromJson(Map<String, dynamic> json) {
     return VitalSummary(
-      readingsCount: json['readings_count'],
-      average: json['average']?.toDouble(),
-      minimum: json['minimum']?.toDouble(),
-      maximum: json['maximum']?.toDouble(),
-      anomalyCount: json['anomaly_count'] ?? 0,
+      readingsCount: _parseInt(json['readings_count']),
+      average: json['average'] != null ? _parseDouble(json['average']) : null,
+      minimum: json['minimum'] != null ? _parseDouble(json['minimum']) : null,
+      maximum: json['maximum'] != null ? _parseDouble(json['maximum']) : null,
+      anomalyCount: _parseInt(json['anomaly_count'] ?? 0),
       trend: json['trend'] ?? 'stable',
       latestReading: json['latest_reading'],
     );
@@ -119,9 +140,9 @@ class MedicationAdherenceSummary {
 
   factory MedicationAdherenceSummary.fromJson(Map<String, dynamic> json) {
     return MedicationAdherenceSummary(
-      rate: (json['rate'] as num).toDouble(),
-      totalScheduled: json['total_scheduled'],
-      totalTaken: json['total_taken'],
+      rate: _parseDouble(json['rate']),
+      totalScheduled: _parseInt(json['total_scheduled']),
+      totalTaken: _parseInt(json['total_taken']),
       trend: json['trend'] ?? 'stable',
     );
   }
@@ -140,9 +161,11 @@ class AlertsSummary {
 
   factory AlertsSummary.fromJson(Map<String, dynamic> json) {
     return AlertsSummary(
-      total: json['total'],
+      total: _parseInt(json['total']),
       bySeverity: Map<String, int>.from(json['by_severity']),
-      avgResponseTime: json['avg_response_time']?.toDouble(),
+      avgResponseTime: json['avg_response_time'] != null
+          ? _parseDouble(json['avg_response_time'])
+          : null,
     );
   }
 }
@@ -160,7 +183,7 @@ class RiskAssessment {
 
   factory RiskAssessment.fromJson(Map<String, dynamic> json) {
     return RiskAssessment(
-      score: (json['score'] as num).toDouble(),
+      score: _parseDouble(json['score']),
       category: json['category'],
       factors: List<String>.from(json['factors']),
     );
@@ -182,13 +205,38 @@ class Insight {
     required this.generatedAt,
   });
 
-  factory Insight.fromJson(Map<String, dynamic> json) {
+  factory Insight.fromJson(dynamic json) {
+    // Handle string inputs (simple messages from backend)
+    if (json is String) {
+      return Insight(
+        type: 'general',
+        severity: 'info',
+        title: 'Health Insight',
+        message: json,
+        generatedAt: DateTime.now(),
+      );
+    }
+
+    // Handle map inputs (structured objects)
+    if (json is Map<String, dynamic>) {
+      return Insight(
+        type: json['type'] ?? 'general',
+        severity: json['severity'] ?? 'info',
+        title: json['title'] ?? 'Health Insight',
+        message: json['message'] ?? json.toString(),
+        generatedAt: json['generated_at'] != null
+            ? DateTime.parse(json['generated_at'])
+            : DateTime.now(),
+      );
+    }
+
+    // Fallback for unknown types
     return Insight(
-      type: json['type'],
-      severity: json['severity'],
-      title: json['title'],
-      message: json['message'],
-      generatedAt: DateTime.parse(json['generated_at']),
+      type: 'unknown',
+      severity: 'info',
+      title: 'Insight',
+      message: json.toString(),
+      generatedAt: DateTime.now(),
     );
   }
 }
@@ -206,12 +254,33 @@ class Recommendation {
     required this.priority,
   });
 
-  factory Recommendation.fromJson(Map<String, dynamic> json) {
+  factory Recommendation.fromJson(dynamic json) {
+    // Handle string inputs
+    if (json is String) {
+      return Recommendation(
+        category: 'general',
+        title: 'Recommendation',
+        description: json,
+        priority: 1,
+      );
+    }
+
+    // Handle map inputs
+    if (json is Map<String, dynamic>) {
+      return Recommendation(
+        category: json['category'] ?? 'general',
+        title: json['title'] ?? 'Recommendation',
+        description: json['description'] ?? json.toString(),
+        priority: json['priority'] ?? 1,
+      );
+    }
+
+    // Fallback
     return Recommendation(
-      category: json['category'],
-      title: json['title'],
-      description: json['description'],
-      priority: json['priority'],
+      category: 'general',
+      title: 'Recommendation',
+      description: json.toString(),
+      priority: 1,
     );
   }
 }
