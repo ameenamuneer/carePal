@@ -52,22 +52,16 @@ class MedicationProvider with ChangeNotifier {
   }
 
   // Log medication as taken
-  Future<bool> markAsTaken(int medicationId, {String? notes}) async {
+  Future<bool> markAsTaken(int adherenceId, {String? notes}) async {
     _isLoading = true;
     _error = null;
     notifyListeners();
 
     try {
-      await _service.logAdherence(
-        medicationId: medicationId,
-        status: 'TAKEN',
-        notes: notes,
-      );
+      await _service.markAdherenceTaken(adherenceId: adherenceId, notes: notes);
 
       // Update local schedule
-      final index = _todaysSchedule.indexWhere(
-        (s) => s.medication.id == medicationId && s.status == 'SCHEDULED',
-      );
+      final index = _todaysSchedule.indexWhere((s) => s.id == adherenceId);
       if (index != -1) {
         _todaysSchedule[index] = MedicationSchedule(
           id: _todaysSchedule[index].id,
@@ -92,22 +86,19 @@ class MedicationProvider with ChangeNotifier {
   }
 
   // Skip medication
-  Future<bool> skipMedication(int medicationId, String reason) async {
+  Future<bool> skipMedication(int adherenceId, String reason) async {
     _isLoading = true;
     _error = null;
     notifyListeners();
 
     try {
-      await _service.logAdherence(
-        medicationId: medicationId,
-        status: 'SKIPPED',
-        notes: reason,
+      await _service.markAdherenceSkipped(
+        adherenceId: adherenceId,
+        reason: reason,
       );
 
       // Update local schedule
-      final index = _todaysSchedule.indexWhere(
-        (s) => s.medication.id == medicationId && s.status == 'SCHEDULED',
-      );
+      final index = _todaysSchedule.indexWhere((s) => s.id == adherenceId);
       if (index != -1) {
         _todaysSchedule[index] = MedicationSchedule(
           id: _todaysSchedule[index].id,

@@ -56,28 +56,43 @@ class MedicationService {
     }
   }
 
-  // Log medication adherence
-  Future<MedicationAdherence> logAdherence({
-    required int medicationId,
-    required String status, // 'TAKEN', 'MISSED', 'SKIPPED'
+  // Mark adherence as taken
+  Future<MedicationAdherence> markAdherenceTaken({
+    required int adherenceId,
     DateTime? takenAt,
     String? notes,
   }) async {
     try {
       final data = {
-        'medication': medicationId,
-        'status': status,
-        'taken_at': (takenAt ?? DateTime.now()).toIso8601String(),
+        'confirmation_method': 'app',
         if (notes != null) 'notes': notes,
       };
 
       final response = await _api.post(
-        '/api/v1/medications/adherence/log/',
+        '/api/v1/medications/adherence/$adherenceId/mark_taken/',
         data: data,
       );
       return MedicationAdherence.fromJson(response.data);
     } catch (e) {
-      throw Exception('Failed to log adherence: $e');
+      throw Exception('Failed to mark as taken: $e');
+    }
+  }
+
+  // Mark adherence as skipped
+  Future<MedicationAdherence> markAdherenceSkipped({
+    required int adherenceId,
+    required String reason,
+  }) async {
+    try {
+      final data = {'skip_reason': reason};
+
+      final response = await _api.post(
+        '/api/v1/medications/adherence/$adherenceId/mark_skipped/',
+        data: data,
+      );
+      return MedicationAdherence.fromJson(response.data);
+    } catch (e) {
+      throw Exception('Failed to mark as skipped: $e');
     }
   }
 
