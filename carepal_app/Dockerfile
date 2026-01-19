@@ -1,29 +1,24 @@
-# Stage 1: Build
-FROM debian:latest AS build-env
+# Use a lightweight base image with Flutter pre-installed or install it
+FROM ghcr.io/cirruslabs/flutter:stable
 
-RUN apt-get update
-RUN apt-get install -y curl git wget unzip libgconf-2-4 gdb libstdc++6 libglu1-mesa fonts-droid-fallback lib32stdc++6 python3
-RUN apt-get clean
-
-# Clone Flutter
-RUN git clone https://github.com/flutter/flutter.git /usr/local/flutter
-
-# Set flutter path
-ENV PATH="/usr/local/flutter/bin:/usr/local/flutter/bin/cache/dart-sdk/bin:${PATH}"
-
-# Run flutter doctor
-RUN flutter doctor
-
-# Copy files
-RUN mkdir /app
-COPY . /app
+# Set working directory
 WORKDIR /app
 
-# Build web
-RUN flutter config --enable-web
-RUN flutter pub get
-RUN flutter build web
+# Copy the dependency files first to cache dependencies
+COPY pubspec.yaml pubspec.lock ./
 
-# Stage 2: Serve
-FROM nginx:1.21.1-alpine
-COPY --from=build-env /app/build/web /usr/share/nginx/html
+# Get dependencies
+RUN flutter pub get
+
+# Copy the rest of the application code
+COPY . .
+
+# Expose the port
+EXPOSE 3000
+
+# Enable web support (just in case it's disabled, though usually enabled by default in recent versions)
+RUN flutter config --enable-web
+
+# Run the application
+# We use web-server device for headless execution in container
+CMD ["flutter", "run", "-d", "web-server", "--web-port", "3000", "--web-hostname", "0.0.0.0"]

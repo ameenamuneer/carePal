@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'providers/auth_provider.dart';
 import 'screens/login_screen.dart';
+import 'core/app_theme.dart';
 
 void main() {
   runApp(
@@ -19,8 +20,15 @@ class CarePalApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'CarePAL',
-      theme: ThemeData(primarySwatch: Colors.blue),
-      home: const LoginScreen(),
+      debugShowCheckedModeBanner: false,
+      theme: AppTheme.lightTheme,
+      home: Consumer<AuthProvider>(
+        builder: (context, auth, _) {
+          // Here you could add a Splash Screen if isLoading is true initially
+          // For now, simpler flow:
+          return const LoginScreen();
+        },
+      ),
     );
   }
 }

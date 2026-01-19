@@ -64,5 +64,16 @@ services:
       - backend
       - redis
 
+  frontend:
+    build: ./carepal_app
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./carepal_app:/app
+    depends_on:
+      - backend
+    environment:
+      - FLUTTER_WEB_PORT=3000
+
 volumes:
   postgres_data:

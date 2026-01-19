@@ -194,8 +194,8 @@ class MetricsEngine:
         """Compute device sync statistics"""
         sync_logs = DeviceSyncLog.objects.filter(
             data_source__patient=self.patient,
-            sync_started_at__date__gte=start_date,
-            sync_started_at__date__lte=end_date
+            started_at__date__gte=start_date,
+            started_at__date__lte=end_date
         )
         
         total_syncs = sync_logs.count()

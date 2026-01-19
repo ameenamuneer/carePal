@@ -472,7 +472,7 @@ class EnhancedFunctionExecutor:
                 from analytics.engines.metrics_engine import MetricsEngine
                 end_date = timezone.now().date()
                 start_date = end_date - timedelta(days=days)
-                metrics = MetricsEngine(self.patient, start_date, end_date).compute_all_metrics()
+                metrics = MetricsEngine(self.patient).compute_period_metrics(start_date, end_date)
                 
                 return {
                     'success': True,
@@ -503,10 +503,10 @@ class EnhancedFunctionExecutor:
                 start_date = end_date - timedelta(days=days)
                 
                 # Compute metrics
-                metrics = MetricsEngine(self.patient, start_date, end_date).compute_all_metrics()
+                metrics = MetricsEngine(self.patient).compute_period_metrics(start_date, end_date)
                 
                 # Generate insights
-                insights = RuleBasedInsights(self.patient).generate_all_insights(metrics)
+                insights = RuleBasedInsights(self.patient).generate_insights(metrics)
                 
                 return {
                     'success': True,
