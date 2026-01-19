@@ -47,8 +47,6 @@ class MetricsEngine:
         
         # Get all vital types for this patient
         vital_types = VitalType.objects.filter(is_active=True)
-        print(f"DEBUG: Found {vital_types.count()} active vital types")
-        print(f"DEBUG: Patient ID: {self.patient.id}")
         
         for vital_type in vital_types:
             readings = VitalReading.objects.filter(
@@ -57,7 +55,6 @@ class MetricsEngine:
                 measured_at__date__gte=start_date,
                 measured_at__date__lte=end_date
             )
-            print(f"DEBUG: Checking {vital_type.code} from {start_date} to {end_date}: Found {readings.count()} readings")
             
             if not readings.exists():
                 continue
@@ -87,7 +84,7 @@ class MetricsEngine:
                 }
             else:
                 # Single value vitals (HR, SpO2, Temp, etc)
-                values = [reading.value for reading in readings if reading.value is not None]
+                values = [float(reading.value) for reading in readings if reading.value is not None]
                 
                 if values:
                     vitals_summary[vital_type.code] = {

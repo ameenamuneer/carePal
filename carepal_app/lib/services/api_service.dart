@@ -11,7 +11,7 @@ class ApiService {
   String? _refreshToken;
 
   static const String baseUrl =
-      'http://localhost:8000'; // Change for production
+      'http://127.0.0.1:8000'; // Change for production
 
   void initialize() {
     _dio = Dio(
