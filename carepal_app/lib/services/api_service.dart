@@ -1,92 +1,122 @@
 import 'package:dio/dio.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiService {
+  static final ApiService _instance = ApiService._internal();
+  factory ApiService() => _instance;
+  ApiService._internal();
+
   late Dio _dio;
-  final FlutterSecureStorage _storage = const FlutterSecureStorage();
+  String? _accessToken;
+  String? _refreshToken;
 
-  // Base URL for API - Use localhost for web/docker dev
-  // In production, this would be an environment variable
-  static const String baseUrl = 'http://localhost:8000/api/v1';
+  static const String baseUrl =
+      'http://localhost:8000'; // Change for production
 
-  ApiService() {
+  void initialize() {
     _dio = Dio(
       BaseOptions(
         baseUrl: baseUrl,
-        connectTimeout: const Duration(seconds: 15),
-        receiveTimeout: const Duration(seconds: 15),
-        headers: {'Content-Type': 'application/json'},
+        connectTimeout: const Duration(seconds: 30),
+        receiveTimeout: const Duration(seconds: 30),
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
       ),
     );
 
-    _setupInterceptors();
-  }
-
-  // Getter for the dio instance
-  Dio get client => _dio;
-
-  void _setupInterceptors() {
+    // Add interceptors
     _dio.interceptors.add(
       InterceptorsWrapper(
         onRequest: (options, handler) async {
-          // Add Access Token to Header
-          final token = await _storage.read(key: 'access_token');
-          if (token != null) {
-            options.headers['Authorization'] = 'Bearer $token';
+          // Add token to headers
+          if (_accessToken != null) {
+            options.headers['Authorization'] = 'Bearer $_accessToken';
           }
           return handler.next(options);
         },
-        onError: (DioException e, handler) async {
-          // Handle 401 Unauthorized - Token Refresh Logic
-          if (e.response?.statusCode == 401) {
-            try {
-              final refreshToken = await _storage.read(key: 'refresh_token');
-              if (refreshToken != null) {
-                // Attempt refresh
-                final refreshResponse = await Dio(
-                  BaseOptions(baseUrl: baseUrl),
-                ).post('/auth/token/refresh/', data: {'refresh': refreshToken});
-
-                if (refreshResponse.statusCode == 200) {
-                  // Save new tokens
-                  final newAccess = refreshResponse.data['access'];
-                  // Some backends might return a new refresh token too
-                  final newRefresh = refreshResponse.data['refresh'];
-
-                  await _storage.write(key: 'access_token', value: newAccess);
-                  if (newRefresh != null) {
-                    await _storage.write(
-                      key: 'refresh_token',
-                      value: newRefresh,
-                    );
-                  }
-
-                  // Retry original request
-                  final opts = e.requestOptions;
-                  opts.headers['Authorization'] = 'Bearer $newAccess';
-
-                  final clonedRequest = await _dio.fetch(opts);
-                  return handler.resolve(clonedRequest);
-                }
-              }
-            } catch (refreshError) {
-              // Refresh failed - User needs to login again
-              // In a real app, you might trigger a logout event stream here
-              await _storage.deleteAll();
+        onError: (error, handler) async {
+          // Handle 401 (unauthorized) - refresh token
+          if (error.response?.statusCode == 401) {
+            if (await _refreshAccessToken()) {
+              // Retry the request
+              final opts = error.requestOptions;
+              opts.headers['Authorization'] = 'Bearer $_accessToken';
+              final response = await _dio.fetch(opts);
+              return handler.resolve(response);
             }
           }
-          return handler.next(e);
+          return handler.next(error);
         },
       ),
     );
   }
 
-  Future<void> saveTokens(String access, String refresh) async {
-    await _storage.write(key: 'access_token', value: access);
-    await _storage.write(key: 'refresh_token', value: refresh);
+  Future<bool> _refreshAccessToken() async {
+    try {
+      if (_refreshToken == null) return false;
+
+      final response = await _dio.post(
+        '/api/v1/auth/token/refresh/',
+        data: {'refresh': _refreshToken},
+      );
+
+      _accessToken = response.data['access'];
+      await _saveTokens(_accessToken!, _refreshToken!);
+      return true;
+    } catch (e) {
+      await clearTokens();
+      return false;
+    }
+  }
+
+  Future<void> saveTokens(String accessToken, String refreshToken) async {
+    _accessToken = accessToken;
+    _refreshToken = refreshToken;
+    await _saveTokens(accessToken, refreshToken);
+  }
+
+  Future<void> _saveTokens(String accessToken, String refreshToken) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('access_token', accessToken);
+    await prefs.setString('refresh_token', refreshToken);
+  }
+
+  Future<void> loadTokens() async {
+    final prefs = await SharedPreferences.getInstance();
+    _accessToken = prefs.getString('access_token');
+    _refreshToken = prefs.getString('refresh_token');
   }
 
   Future<void> clearTokens() async {
-    await _storage.deleteAll();
+    _accessToken = null;
+    _refreshToken = null;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('access_token');
+    await prefs.remove('refresh_token');
+  }
+
+  bool get hasValidToken => _accessToken != null;
+
+  // HTTP Methods
+  Future<Response> get(String path, {Map<String, dynamic>? queryParameters}) {
+    return _dio.get(path, queryParameters: queryParameters);
+  }
+
+  Future<Response> post(String path, {dynamic data}) {
+    return _dio.post(path, data: data);
+  }
+
+  Future<Response> put(String path, {dynamic data}) {
+    return _dio.put(path, data: data);
+  }
+
+  Future<Response> patch(String path, {dynamic data}) {
+    return _dio.patch(path, data: data);
+  }
+
+  Future<Response> delete(String path) {
+    return _dio.delete(path);
   }
 }

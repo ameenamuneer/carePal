@@ -41,7 +41,12 @@ dependencies:
   flutter_secure_storage: ^10.0.0
   shared_preferences: ^2.5.4
   google_fonts: ^7.0.2
-  font_awesome_flutter: ^10.12.0
+  font_awesome_flutter: ^10.6.0
+  fl_chart: ^0.66.0
+  
+  # Utilities
+  intl: ^0.18.1
+  table_calendar: ^3.0.9
 
 dev_dependencies:
   flutter_test:

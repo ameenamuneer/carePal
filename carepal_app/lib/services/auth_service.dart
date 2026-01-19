@@ -6,8 +6,8 @@ class AuthService {
 
   Future<Map<String, dynamic>> login(String username, String password) async {
     try {
-      final response = await _apiService.client.post(
-        '/auth/login/',
+      final response = await _apiService.post(
+        '/api/v1/auth/login/',
         data: {'username': username, 'password': password},
       );
       return response.data;
@@ -18,8 +18,8 @@ class AuthService {
 
   Future<Map<String, dynamic>> register(Map<String, dynamic> userData) async {
     try {
-      final response = await _apiService.client.post(
-        '/auth/register/',
+      final response = await _apiService.post(
+        '/api/v1/auth/register/',
         data: userData,
       );
       return response.data;
@@ -30,8 +30,8 @@ class AuthService {
 
   Future<void> logout(String refreshToken) async {
     try {
-      await _apiService.client.post(
-        '/auth/logout/',
+      await _apiService.post(
+        '/api/v1/auth/logout/',
         data: {'refresh': refreshToken},
       );
       await _apiService.clearTokens();
@@ -44,7 +44,7 @@ class AuthService {
 
   Future<Map<String, dynamic>> getProfile() async {
     try {
-      final response = await _apiService.client.get('/auth/profile/');
+      final response = await _apiService.get('/api/v1/auth/profile/');
       return response.data;
     } on DioException catch (e) {
       throw _handleError(e);
