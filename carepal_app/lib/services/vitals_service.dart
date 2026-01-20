@@ -69,7 +69,7 @@ class VitalsService {
   // Get vital types
   Future<List<VitalType>> getVitalTypes() async {
     try {
-      final response = await _api.get('/api/v1/vitals/types/');
+      final response = await _api.get('/api/v1/vitals/vital-types/');
       final results = response.data['results'] as List;
       return results.map((json) => VitalType.fromJson(json)).toList();
     } catch (e) {
