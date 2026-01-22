@@ -26,7 +26,10 @@ class MedicationProvider with ChangeNotifier {
     notifyListeners();
 
     try {
-      _todaysSchedule = await _service.getTodaysSchedule();
+      final results = await _service.getTodaysSchedule();
+      _todaysSchedule = (results as List)
+          .map((i) => MedicationSchedule.fromJson(i))
+          .toList();
     } catch (e) {
       _error = e.toString();
     } finally {
@@ -42,7 +45,12 @@ class MedicationProvider with ChangeNotifier {
     notifyListeners();
 
     try {
-      _medications = await _service.getMedications(status: status);
+      final response = await _service.getMedications(status: status);
+      if (response['results'] != null) {
+        _medications = (response['results'] as List)
+            .map((i) => Medication.fromJson(i))
+            .toList();
+      }
     } catch (e) {
       _error = e.toString();
     } finally {
@@ -124,10 +132,18 @@ class MedicationProvider with ChangeNotifier {
   // Load adherence history
   Future<void> loadAdherenceHistory({int? medicationId, int days = 30}) async {
     try {
-      _adherenceHistory = await _service.getAdherenceHistory(
+      // API uses pagination or date range, not days directly in top level
+      final response = await _service.getAdherenceHistory(
         medicationId: medicationId,
-        days: days,
+        // days: days // Removed as not supported in new service directly
       );
+
+      if (response['results'] != null) {
+        _adherenceHistory = (response['results'] as List)
+            .map((i) => MedicationAdherence.fromJson(i))
+            .toList();
+      }
+
       notifyListeners();
     } catch (e) {
       _error = e.toString();
@@ -138,7 +154,7 @@ class MedicationProvider with ChangeNotifier {
   // Load adherence rate
   Future<void> loadAdherenceRate({int days = 7}) async {
     try {
-      _adherenceRate = await _service.getAdherenceRate(days);
+      _adherenceRate = await _service.getAdherenceRate(days: days);
       notifyListeners();
     } catch (e) {
       _error = e.toString();

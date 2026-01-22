@@ -17,7 +17,10 @@ class AuthProvider with ChangeNotifier {
   Future<bool> login(String username, String password) async {
     _setLoading(true);
     try {
-      final data = await _authService.login(username, password);
+      final data = await _authService.login(
+        username: username,
+        password: password,
+      );
 
       // Save tokens
       final tokens = data['tokens'];
@@ -42,7 +45,18 @@ class AuthProvider with ChangeNotifier {
   Future<bool> register(Map<String, dynamic> userData) async {
     _setLoading(true);
     try {
-      final data = await _authService.register(userData);
+      final data = await _authService.register(
+        username: userData['username'],
+        email: userData['email'],
+        phoneNumber: userData['phoneNumber'] ?? userData['phone_number'],
+        password: userData['password'],
+        passwordConfirm:
+            userData['passwordConfirm'] ?? userData['password_confirm'],
+        userType: userData['userType'] ?? userData['user_type'] ?? 'PATIENT',
+        firstName: userData['firstName'] ?? userData['first_name'],
+        lastName: userData['lastName'] ?? userData['last_name'],
+        dateOfBirth: userData['dateOfBirth'] ?? userData['date_of_birth'],
+      );
 
       // Auto login after register
       final tokens = data['tokens'];
@@ -69,9 +83,7 @@ class AuthProvider with ChangeNotifier {
       // if we modify it to read from storage.
       // For now, let's just clear local state as the backend logout requires refresh token
       // which we haven't exposed a reader for in this simple provider yet.
-      await _authService.logout(
-        "",
-      ); // Sending empty, ApiService will just clear local
+      await _authService.logout();
     } catch (_) {
       // Ignore logout errors
     }

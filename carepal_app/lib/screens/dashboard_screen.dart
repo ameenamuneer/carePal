@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import '../core/app_colors.dart';
@@ -6,17 +7,14 @@ import '../providers/auth_provider.dart';
 import '../providers/dashboard_provider.dart';
 import '../providers/vitals_provider.dart';
 import '../providers/medication_provider.dart';
+import '../widgets/carepal_logo.dart';
 import '../widgets/loading_shimmer.dart';
 import '../widgets/error_view.dart';
-import 'login_screen.dart';
 import 'profile/profile_screen.dart';
 import 'analytics/analytics_screen.dart';
 import 'ai_agent/ai_voice_screen.dart';
 import 'vitals/vitals_detail_screen.dart';
-import 'medications/medications_screen.dart';
-import 'alerts/alerts_screen.dart';
 import '../widgets/quick_vital_entry.dart';
-import '../services/emergency_service.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -196,32 +194,48 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
 // ==================== HOME TAB ====================
 
-class _HomeTab extends StatelessWidget {
+class _HomeTab extends StatefulWidget {
   final String name;
   final VoidCallback onRefresh;
 
   const _HomeTab({required this.name, required this.onRefresh});
 
   @override
+  State<_HomeTab> createState() => _HomeTabState();
+}
+
+class _HomeTabState extends State<_HomeTab> {
+  late Stream<DateTime> _timerStream;
+
+  @override
+  void initState() {
+    super.initState();
+    _timerStream = Stream.periodic(
+      const Duration(seconds: 1),
+      (_) => DateTime.now(),
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
     return RefreshIndicator(
-      onRefresh: () async => onRefresh(),
+      onRefresh: () async => widget.onRefresh(),
       color: AppColors.primary,
       child: SingleChildScrollView(
         physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.all(20),
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _buildHeader(context),
-            const SizedBox(height: 16),
-            _buildHealthScoreCard(),
-            const SizedBox(height: 16),
-            _buildQuickActions(context),
-            const SizedBox(height: 16),
-            _buildVitalsSection(context),
-            const SizedBox(height: 16),
-            _buildMedicationsSection(context),
+            _buildStatusBar(),
+            const SizedBox(height: 32),
+            _buildGreeting(),
+            const SizedBox(height: 32),
+            _buildVitalsGrid(context),
+            const SizedBox(height: 24),
+            _buildMedicationPanel(context),
+            const SizedBox(height: 40),
+            _buildVoiceAssistantTrigger(context),
             const SizedBox(height: 100),
           ],
         ),
@@ -229,436 +243,192 @@ class _HomeTab extends StatelessWidget {
     );
   }
 
-  Widget _buildHeader(BuildContext context) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+  Widget _buildStatusBar() {
+    return StreamBuilder<DateTime>(
+      stream: _timerStream,
+      builder: (context, snapshot) {
+        final time = snapshot.data ?? DateTime.now();
+        final timeStr = DateFormat('hh:mm a').format(time);
+
+        return Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text(
-              'Welcome back,',
-              style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
+            // Status
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(
+                  color: AppColors.primaryLight.withOpacity(0.3),
+                ),
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    width: 8,
+                    height: 8,
+                    decoration: const BoxDecoration(
+                      color: AppColors.success,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    'PAL Connected',
+                    style: TextStyle(
+                      color: AppColors.primaryDark,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
             ),
-            const SizedBox(height: 2),
+
+            // Time
             Text(
-              name,
+              timeStr,
               style: TextStyle(
                 fontSize: 24,
                 fontWeight: FontWeight.bold,
-                color: AppColors.textPrimary,
+                color: AppColors.primaryDark,
               ),
             ),
-          ],
-        ),
-        Row(
-          children: [
-            GestureDetector(
-              onTap: () => _showEmergencyDialog(context),
-              child: Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: AppColors.error.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: AppColors.error, width: 1.5),
-                ),
-                child: Icon(Icons.emergency, color: AppColors.error, size: 20),
-              ),
-            ),
-            const SizedBox(width: 8),
-            IconButton(
-              icon: Icon(
-                Icons.logout,
-                color: AppColors.textSecondary,
-                size: 22,
-              ),
-              onPressed: () => _handleLogout(context),
-            ),
-          ],
-        ),
-      ],
-    );
-  }
 
-  void _showEmergencyDialog(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: Row(
-          children: [
-            Icon(Icons.emergency, color: AppColors.error),
-            const SizedBox(width: 12),
-            const Text(
-              'Emergency Alert',
-              style: TextStyle(fontSize: 18, color: AppColors.error),
-            ),
-          ],
-        ),
-        content: const Text(
-          'This will call your emergency contacts and alert medical services. Continue?',
-          style: TextStyle(height: 1.5),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(dialogContext);
-              _triggerEmergency(context);
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.error,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-            ),
-            child: const Text(
-              'Call Emergency',
-              style: TextStyle(color: Colors.white),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _triggerEmergency(BuildContext context) async {
-    final dashboardProvider = context.read<DashboardProvider>();
-    final patientId = dashboardProvider.dashboardData?.patientId;
-
-    if (patientId == null) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Error: Patient info not loaded')),
-        );
-      }
-      return;
-    }
-
-    try {
-      final service = EmergencyService();
-      await service.triggerEmergencyCall(
-        patientId,
-        'Manual Emergency Button Triggered',
-      );
-
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Row(
+            // Actions
+            Row(
               children: [
-                const Icon(Icons.check_circle, color: Colors.white),
-                const SizedBox(width: 12),
-                const Text('Emergency services notified'),
-              ],
-            ),
-            backgroundColor: AppColors.error,
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
-            ),
-            duration: const Duration(seconds: 3),
-          ),
-        );
-      }
-    } catch (e) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to call emergency: $e'),
-            backgroundColor: AppColors.error,
-          ),
-        );
-      }
-    }
-  }
-
-  Future<void> _handleLogout(BuildContext context) async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text('Logout'),
-        content: const Text('Are you sure?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: ElevatedButton.styleFrom(backgroundColor: AppColors.error),
-            child: const Text('Logout', style: TextStyle(color: Colors.white)),
-          ),
-        ],
-      ),
-    );
-
-    if (confirm == true && context.mounted) {
-      await context.read<AuthProvider>().logout();
-      Navigator.of(
-        context,
-      ).pushReplacement(MaterialPageRoute(builder: (_) => const LoginScreen()));
-    }
-  }
-
-  Widget _buildHealthScoreCard() {
-    return Consumer<DashboardProvider>(
-      builder: (context, provider, _) {
-        final score = provider.healthScore?.score ?? 0;
-        final category = provider.healthScore?.category ?? 'Loading';
-
-        return Container(
-          padding: const EdgeInsets.all(24),
-          decoration: BoxDecoration(
-            gradient: AppColors.primaryGradient,
-            borderRadius: BorderRadius.circular(20),
-            boxShadow: [
-              BoxShadow(
-                color: AppColors.primary.withOpacity(0.25),
-                blurRadius: 15,
-                offset: const Offset(0, 8),
-              ),
-            ],
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                Stack(
                   children: [
-                    Text(
-                      'Health Score',
-                      style: TextStyle(
-                        color: Colors.white.withOpacity(0.9),
-                        fontSize: 13,
-                        fontWeight: FontWeight.w500,
-                      ),
+                    Icon(
+                      Icons.notifications_outlined,
+                      color: AppColors.primary,
+                      size: 28,
                     ),
-                    const SizedBox(height: 8),
-                    Text(
-                      score > 0 ? '$score' : '--',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 48,
-                        fontWeight: FontWeight.bold,
-                        height: 1,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 6,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Text(
-                        category.toUpperCase(),
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: 0.5,
+                    Positioned(
+                      top: 0,
+                      right: 0,
+                      child: Container(
+                        width: 10,
+                        height: 10,
+                        decoration: BoxDecoration(
+                          color: AppColors.alert,
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: AppColors.background,
+                            width: 2,
+                          ),
                         ),
                       ),
                     ),
                   ],
                 ),
-              ),
-              Container(
-                width: 80,
-                height: 80,
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.15),
-                  shape: BoxShape.circle,
+                const SizedBox(width: 16),
+                Container(
+                  padding: const EdgeInsets.all(4),
+                  decoration: BoxDecoration(
+                    color: AppColors.primaryLighter,
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    Icons.person,
+                    color: AppColors.primaryDark,
+                    size: 24,
+                  ),
                 ),
-                child: const Icon(
-                  Icons.favorite_rounded,
-                  color: Colors.white,
-                  size: 40,
-                ),
-              ),
-            ],
-          ),
+              ],
+            ),
+          ],
         );
       },
     );
   }
 
-  Widget _buildQuickActions(BuildContext context) {
-    return Row(
-      children: [
-        Expanded(
-          child: _buildActionCard(
-            icon: Icons.add_circle_outline,
-            label: 'Add Vitals',
-            color: AppColors.primary,
-            onTap: () {
-              showModalBottomSheet(
-                context: context,
-                isScrollControlled: true,
-                backgroundColor: Colors.transparent,
-                builder: (_) => const QuickVitalEntry(),
-              );
-            },
-          ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: _buildActionCard(
-            icon: Icons.notifications_active,
-            label: 'Alerts',
-            color: AppColors.alert,
-            onTap: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const AlertsScreen()),
-              );
-            },
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildActionCard({
-    required IconData icon,
-    required String label,
-    required Color color,
-    required VoidCallback onTap,
-  }) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
-        decoration: BoxDecoration(
-          color: AppColors.surface,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: color.withOpacity(0.15)),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.02),
-              blurRadius: 6,
-              offset: const Offset(0, 2),
-            ),
-          ],
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: color.withOpacity(0.12),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Icon(icon, color: color, size: 20),
-            ),
-            const SizedBox(width: 10),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                color: AppColors.textPrimary,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildVitalsSection(BuildContext context) {
+  Widget _buildGreeting() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(
-              'Vitals',
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-                color: AppColors.textPrimary,
-              ),
-            ),
-            TextButton.icon(
-              onPressed: () {
-                // TODO: Navigate to all vitals screen
-              },
-              icon: Icon(
-                Icons.arrow_forward,
-                size: 16,
-                color: AppColors.primary,
-              ),
-              label: Text(
-                'View All',
-                style: TextStyle(
-                  fontSize: 13,
-                  color: AppColors.primary,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-          ],
+        const CarePalLogo(size: 40, showText: true),
+        const SizedBox(height: 16),
+        Text(
+          'Good morning, ${widget.name}',
+          style: GoogleFonts.lexend(
+            fontSize: 32,
+            fontWeight: FontWeight.bold,
+            color: AppColors.primaryDark,
+            height: 1.1,
+          ),
         ),
-        const SizedBox(height: 12),
-        Consumer<DashboardProvider>(
-          builder: (context, provider, _) {
-            final vitals = provider.vitalsSummary ?? {};
-            return GridView.count(
-              crossAxisCount: 2,
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              mainAxisSpacing: 12,
-              crossAxisSpacing: 12,
-              childAspectRatio: 1.4, // More compact ratio
-              children: [
-                _buildVitalCard(
-                  context,
-                  'BP',
-                  'Blood Pressure',
-                  vitals['BP'],
-                  Icons.favorite,
-                  AppColors.vitalsRed,
-                ),
-                _buildVitalCard(
-                  context,
-                  'HR',
-                  'Heart Rate',
-                  vitals['HR'],
-                  Icons.monitor_heart,
-                  AppColors.vitalsPink,
-                ),
-                _buildVitalCard(
-                  context,
-                  'SPO2',
-                  'Oxygen',
-                  vitals['SPO2'],
-                  Icons.air,
-                  AppColors.vitalsBlue,
-                ),
-                _buildVitalCard(
-                  context,
-                  'TEMP',
-                  'Temperature',
-                  vitals['TEMP'],
-                  Icons.thermostat,
-                  AppColors.vitalsOrange,
-                ),
-              ],
-            );
-          },
+        const SizedBox(height: 8),
+        Text(
+          "I'm ready for our daily check-in.",
+          style: TextStyle(
+            fontSize: 18,
+            color: AppColors.primary.withOpacity(0.8),
+            fontWeight: FontWeight.w500,
+          ),
         ),
       ],
+    );
+  }
+
+  Widget _buildVitalsGrid(BuildContext context) {
+    return Consumer<DashboardProvider>(
+      builder: (context, provider, _) {
+        final vitals = provider.vitalsSummary ?? {};
+
+        return Column(
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: _buildVitalCard(
+                    context,
+                    'HR',
+                    'Heart Rate',
+                    vitals['HR'],
+                    Icons.favorite,
+                    AppColors.vitalsRed,
+                    'bpm',
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: _buildVitalCard(
+                    context,
+                    'BP',
+                    'Biomedical Pressure', // Adjusted name
+                    vitals['BP'],
+                    Icons.monitor_heart,
+                    AppColors.vitalsBlue,
+                    'mmHg',
+                    isBp: true,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: _buildVitalCard(
+                    context,
+                    'TEMP',
+                    'Temperature',
+                    vitals['TEMP'],
+                    Icons.thermostat,
+                    AppColors.vitalsOrange,
+                    '°F',
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(child: _buildMeasureNowCard(context)),
+              ],
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -669,61 +439,40 @@ class _HomeTab extends StatelessWidget {
     dynamic summary,
     IconData icon,
     Color color,
-  ) {
+    String unit, {
+    bool isBp = false,
+  }) {
     String value = '--';
-    String unit = '';
     String status = 'Normal';
     Color statusColor = AppColors.success;
+    Color iconBgColor = color.withOpacity(0.1);
 
     if (summary?.latestReading != null) {
       final latest = summary.latestReading;
-      if (code == 'BP' && latest['values'] != null) {
-        final systolic = latest['values']['systolic'];
-        final diastolic = latest['values']['diastolic'];
-        value = '$systolic/$diastolic';
-        unit = 'mmHg';
+      if (isBp && latest['values'] != null) {
+        final double s = (latest['values']['systolic'] as num).toDouble();
+        final double d = (latest['values']['diastolic'] as num).toDouble();
+        value = '${s.toInt()}/${d.toInt()}';
 
-        // BP status logic
-        if (systolic > 140 || diastolic > 90) {
+        if (s > 140 || d > 90) {
           status = 'High';
           statusColor = AppColors.error;
-        } else if (systolic > 130 || diastolic > 85) {
+        } else if (s > 130 || d > 85) {
           status = 'Elevated';
           statusColor = AppColors.warning;
         }
       } else if (latest['value'] != null) {
-        final val = latest['value'];
+        final double val = (latest['value'] as num).toDouble();
         value = val.toString();
 
-        // Set unit and status based on vital type
-        switch (code) {
-          case 'HR':
-            unit = 'bpm';
-            if (val < 60) {
-              status = 'Low';
-              statusColor = AppColors.warning;
-            } else if (val > 100) {
-              status = 'High';
-              statusColor = AppColors.error;
-            }
-            break;
-          case 'SPO2':
-            unit = '%';
-            if (val < 95) {
-              status = 'Low';
-              statusColor = AppColors.error;
-            }
-            break;
-          case 'TEMP':
-            unit = '°F';
-            if (val > 99.5) {
-              status = 'Fever';
-              statusColor = AppColors.error;
-            } else if (val < 97) {
-              status = 'Low';
-              statusColor = AppColors.warning;
-            }
-            break;
+        // Simple logic for demo
+        if (code == 'HR' && val > 100) {
+          status = 'High';
+          statusColor = AppColors.alert;
+        }
+        if (code == 'TEMP' && val > 99.5) {
+          status = 'Fever';
+          statusColor = AppColors.alert;
         }
       }
     }
@@ -743,34 +492,35 @@ class _HomeTab extends StatelessWidget {
         );
       },
       child: Container(
-        padding: const EdgeInsets.all(16),
+        height: 180,
+        padding: const EdgeInsets.all(20),
         decoration: BoxDecoration(
-          color: AppColors.surface,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: color.withOpacity(0.15), width: 1.5),
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(color: AppColors.primaryLight.withOpacity(0.3)),
           boxShadow: [
             BoxShadow(
-              color: color.withOpacity(0.08),
-              blurRadius: 8,
-              offset: const Offset(0, 3),
+              color: AppColors.primary.withOpacity(0.05),
+              blurRadius: 10,
+              offset: const Offset(0, 4),
             ),
           ],
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            // Header row: Icon + Status badge
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Container(
-                  padding: const EdgeInsets.all(8),
+                  padding: const EdgeInsets.all(10),
                   decoration: BoxDecoration(
-                    color: color.withOpacity(0.12),
-                    borderRadius: BorderRadius.circular(10),
+                    color: iconBgColor,
+                    borderRadius: BorderRadius.circular(16),
                   ),
-                  child: Icon(icon, color: color, size: 18),
+                  child: Icon(icon, color: color, size: 24),
                 ),
                 Container(
                   padding: const EdgeInsets.symmetric(
@@ -778,65 +528,54 @@ class _HomeTab extends StatelessWidget {
                     vertical: 4,
                   ),
                   decoration: BoxDecoration(
-                    color: statusColor.withOpacity(0.12),
-                    borderRadius: BorderRadius.circular(8),
+                    color: statusColor.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(20),
                   ),
                   child: Text(
-                    status,
+                    status.toUpperCase(),
                     style: TextStyle(
                       fontSize: 10,
                       fontWeight: FontWeight.bold,
                       color: statusColor,
-                      letterSpacing: 0.3,
                     ),
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 12),
-
-            // Vital name
-            Text(
-              name,
-              style: TextStyle(
-                fontSize: 11,
-                color: AppColors.textSecondary,
-                fontWeight: FontWeight.w500,
-              ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-            const SizedBox(height: 4),
-
-            // Value
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.baseline,
-              textBaseline: TextBaseline.alphabetic,
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Flexible(
-                  child: Text(
-                    value,
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                      color: AppColors.textPrimary,
-                      height: 1.2,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                RichText(
+                  text: TextSpan(
+                    children: [
+                      TextSpan(
+                        text: value,
+                        style: GoogleFonts.lexend(
+                          fontSize: 32,
+                          fontWeight: FontWeight.bold,
+                          color: AppColors.primaryDark,
+                        ),
+                      ),
+                      TextSpan(
+                        text: ' $unit',
+                        style: TextStyle(
+                          fontSize: 14,
+                          color: AppColors.textTertiary,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                if (unit.isNotEmpty) ...[
-                  const SizedBox(width: 4),
-                  Text(
-                    unit,
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: AppColors.textSecondary,
-                      fontWeight: FontWeight.w500,
-                    ),
+                const SizedBox(height: 4),
+                Text(
+                  name,
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: AppColors.textSecondary,
+                    fontWeight: FontWeight.w500,
                   ),
-                ],
+                ),
               ],
             ),
           ],
@@ -845,200 +584,233 @@ class _HomeTab extends StatelessWidget {
     );
   }
 
-  Widget _buildMedicationsSection(BuildContext context) {
-    return Consumer<MedicationProvider>(
-      builder: (context, provider, _) {
-        final schedule = provider.todaysSchedule;
-        final adherence = provider.adherenceRate;
-
-        return GestureDetector(
-          onTap: () {
-            Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const MedicationsScreen()),
-            );
-          },
-          child: Container(
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: AppColors.surface,
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: AppColors.border),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.03),
-                  blurRadius: 10,
-                  offset: const Offset(0, 4),
-                ),
-              ],
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      'Today\'s Medications',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                        color: AppColors.textPrimary,
-                      ),
-                    ),
-                    Row(
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 6,
-                          ),
-                          decoration: BoxDecoration(
-                            color: AppColors.primaryLighter,
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Text(
-                            '${adherence.toInt()}%',
-                            style: TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.bold,
-                              color: AppColors.primary,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Icon(
-                          Icons.chevron_right,
-                          color: AppColors.textTertiary,
-                          size: 20,
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 16),
-                if (schedule.isEmpty)
-                  Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(20),
-                      child: Text(
-                        'No medications scheduled',
-                        style: TextStyle(
-                          color: AppColors.textTertiary,
-                          fontSize: 14,
-                        ),
-                      ),
-                    ),
-                  )
-                else
-                  ...schedule
-                      .take(3)
-                      .map(
-                        (med) => Padding(
-                          padding: const EdgeInsets.only(bottom: 12),
-                          child: _buildMedicationItem(context, med, provider),
-                        ),
-                      ),
-              ],
-            ),
-          ),
+  Widget _buildMeasureNowCard(BuildContext context) {
+    return GestureDetector(
+      onTap: () {
+        showModalBottomSheet(
+          context: context,
+          isScrollControlled: true,
+          backgroundColor: Colors.transparent,
+          builder: (_) => const QuickVitalEntry(),
         );
       },
+      child: Container(
+        height: 180,
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          color: AppColors.primary,
+          borderRadius: BorderRadius.circular(24),
+          boxShadow: [
+            BoxShadow(
+              color: AppColors.primary.withOpacity(0.3),
+              blurRadius: 10,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.2),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.add, color: Colors.white, size: 32),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'Measure Vitals Now',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
-  // Update _buildMedicationItem to handle actions:
-  Widget _buildMedicationItem(
-    BuildContext context,
-    dynamic schedule,
-    MedicationProvider provider,
-  ) {
-    final medication = schedule.medication;
-    final time = DateFormat('hh:mm a').format(schedule.scheduledTime);
-    final isTaken = schedule.isTaken;
-
+  Widget _buildMedicationPanel(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
-        color: AppColors.primaryLighter.withOpacity(0.3),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: isTaken ? AppColors.success : AppColors.primary,
-          width: 1,
-        ),
-      ),
-      child: Row(
-        children: [
-          Container(
-            padding: const EdgeInsets.all(8),
-            decoration: BoxDecoration(
-              color: isTaken ? AppColors.success : AppColors.primary,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Icon(
-              isTaken ? Icons.check : Icons.medication,
-              color: Colors.white,
-              size: 20,
-            ),
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(32),
+        border: Border.all(color: AppColors.primaryLight.withOpacity(0.3)),
+        boxShadow: [
+          BoxShadow(
+            color: AppColors.primary.withOpacity(0.05),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
           ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+        ],
+      ),
+      child: Column(
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'Medicines',
+                style: GoogleFonts.lexend(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                  color: AppColors.primaryDark,
+                ),
+              ),
+              Icon(Icons.calendar_today, color: AppColors.primaryLight),
+            ],
+          ),
+          const SizedBox(height: 20),
+          Consumer<MedicationProvider>(
+            builder: (context, provider, _) {
+              if (provider.todaysSchedule.isEmpty) {
+                return const Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(16.0),
+                    child: Text("No medications due today"),
+                  ),
+                );
+              }
+              // Show first 3
+              final meds = provider.todaysSchedule.take(3).toList();
+
+              return Column(
+                children: meds.map((med) {
+                  bool isTaken = med.isTaken;
+                  // "Due" logic could be refined (e.g. check time), but simplified here:
+                  bool isDue = !isTaken;
+
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 12),
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: isTaken
+                          ? AppColors.primaryLight.withOpacity(0.1)
+                          : (isDue
+                                ? AppColors.alert.withOpacity(0.05)
+                                : Colors.grey[50]),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: isTaken
+                            ? AppColors.primaryLight
+                            : (isDue
+                                  ? AppColors.alert.withOpacity(0.3)
+                                  : Colors.grey[200]!),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 12,
+                          height: 12,
+                          decoration: BoxDecoration(
+                            color: isTaken
+                                ? AppColors.primary
+                                : (isDue ? AppColors.alert : Colors.grey),
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                med.medication.medicationName,
+                                style: const TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                  color: AppColors.primaryDark,
+                                ),
+                              ),
+                              Text(
+                                DateFormat('hh:mm a').format(med.scheduledTime),
+                                style: const TextStyle(
+                                  fontSize: 14,
+                                  color: AppColors.textSecondary,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }).toList(),
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildVoiceAssistantTrigger(BuildContext context) {
+    return Center(
+      child: Column(
+        children: [
+          GestureDetector(
+            onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const AIVoiceScreen()),
+              );
+            },
+            child: Stack(
+              alignment: Alignment.center,
               children: [
-                Text(
-                  medication.medicationName,
-                  style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                    color: AppColors.textPrimary,
+                // Pulse effect (static for now, could be animated)
+                Container(
+                  width: 80,
+                  height: 80,
+                  decoration: BoxDecoration(
+                    color: AppColors.primary.withOpacity(0.2),
+                    shape: BoxShape.circle,
                   ),
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  '${medication.dosage} • $time',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: AppColors.textSecondary,
+                Container(
+                  width: 64,
+                  height: 64,
+                  decoration: BoxDecoration(
+                    color: AppColors.primary.withOpacity(0.4),
+                    shape: BoxShape.circle,
                   ),
+                ),
+                Container(
+                  width: 50,
+                  height: 50,
+                  decoration: BoxDecoration(
+                    color: AppColors.primary,
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(
+                        color: AppColors.primary.withOpacity(0.4),
+                        blurRadius: 15,
+                        offset: const Offset(0, 5),
+                      ),
+                    ],
+                  ),
+                  child: const Icon(Icons.mic, color: Colors.white, size: 28),
                 ),
               ],
             ),
           ),
-          if (!isTaken) // Show checkmark only if not taken
-            GestureDetector(
-              onTap: () async {
-                // mark method expects schedule id, not medication id?
-                // The user example used medication.id, but usually you mark a specific schedule.
-                // Let's assume schedule.id is correct as per MedicationSchedule model logic usually.
-                // If `schedule` is the object, it likely has an `id`.
-                // User code: await provider.markAsTaken(medication.id);
-                // Wait, markAsTaken usually needs the schedule entry ID to mark THAT specific time slot.
-                // I will use schedule.id if available, or investigate.
-                // Assuming provider.markAsTaken takes schedule ID.
-                final success = await provider.markAsTaken(schedule.id);
-                if (success && context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: const Text('Marked as taken'),
-                      backgroundColor: AppColors.success,
-                      behavior: SnackBarBehavior.floating,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
-                  );
-                }
-              },
-              child: Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: AppColors.success.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Icon(Icons.check, color: AppColors.success, size: 20),
-              ),
+          const SizedBox(height: 12),
+          Text(
+            'TAP TO SPEAK WITH PAL',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+              letterSpacing: 1.2,
+              color: AppColors.primaryDark.withOpacity(0.7),
             ),
+          ),
         ],
       ),
     );

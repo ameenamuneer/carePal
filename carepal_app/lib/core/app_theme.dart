@@ -213,7 +213,7 @@ class AppTheme {
       iconTheme: const IconThemeData(color: AppColors.textSecondary, size: 24),
 
       // Text Theme - Custom Typography
-      textTheme: GoogleFonts.poppinsTextTheme(
+      textTheme: GoogleFonts.lexendTextTheme(
         const TextTheme(
           // Display styles (largest)
           displayLarge: TextStyle(
@@ -318,7 +318,7 @@ class AppTheme {
       chipTheme: ChipThemeData(
         backgroundColor: AppColors.primaryLighter,
         selectedColor: AppColors.primary,
-        disabledColor: AppColors.backgroundDark,
+        disabledColor: AppColors.textTertiary.withOpacity(0.2),
         labelStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),

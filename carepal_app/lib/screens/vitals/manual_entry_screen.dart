@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../core/app_colors.dart';
 import '../../providers/vitals_provider.dart';
+import '../../providers/auth_provider.dart';
 
 class ManualEntryScreen extends StatefulWidget {
   final String vitalCode;
@@ -466,6 +467,21 @@ class _ManualEntryScreenState extends State<ManualEntryScreen> {
     setState(() => _isSubmitting = true);
 
     final provider = context.read<VitalsProvider>();
+    final authProvider = context.read<AuthProvider>();
+    final user = authProvider.user;
+
+    // Assume patientId is user['id'] based on login response
+    final patientId = user != null ? user['id'] as int? : null;
+
+    if (patientId == null) {
+      if (mounted) {
+        setState(() => _isSubmitting = false);
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Error: Not logged in')));
+      }
+      return;
+    }
 
     // Find vital type ID
     final vitalType = provider.vitalTypes.firstWhere(
@@ -477,6 +493,7 @@ class _ManualEntryScreenState extends State<ManualEntryScreen> {
 
     if (widget.vitalCode == 'BP') {
       success = await provider.createReading(
+        patientId: patientId,
         vitalTypeId: vitalType.id,
         values: {
           'systolic': int.parse(_systolicController.text),
@@ -488,6 +505,7 @@ class _ManualEntryScreenState extends State<ManualEntryScreen> {
       );
     } else {
       success = await provider.createReading(
+        patientId: patientId,
         vitalTypeId: vitalType.id,
         value: double.parse(_valueController.text),
         unit: _getUnit(),

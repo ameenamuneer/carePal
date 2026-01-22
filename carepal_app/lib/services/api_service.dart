@@ -97,26 +97,50 @@ class ApiService {
     await prefs.remove('refresh_token');
   }
 
+  Future<String?> getAccessToken() async {
+    if (_accessToken == null) {
+      await loadTokens();
+    }
+    return _accessToken;
+  }
+
+  Future<String?> getRefreshToken() async {
+    if (_refreshToken == null) {
+      await loadTokens();
+    }
+    return _refreshToken;
+  }
+
+  Future<void> saveAccessToken(String token) async {
+    _accessToken = token;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('access_token', token);
+  }
+
   bool get hasValidToken => _accessToken != null;
 
   // HTTP Methods
-  Future<Response> get(String path, {Map<String, dynamic>? queryParameters}) {
-    return _dio.get(path, queryParameters: queryParameters);
+  Future<Response> get(
+    String path, {
+    Map<String, dynamic>? queryParameters,
+    Options? options,
+  }) {
+    return _dio.get(path, queryParameters: queryParameters, options: options);
   }
 
-  Future<Response> post(String path, {dynamic data}) {
-    return _dio.post(path, data: data);
+  Future<Response> post(String path, {dynamic data, Options? options}) {
+    return _dio.post(path, data: data, options: options);
   }
 
-  Future<Response> put(String path, {dynamic data}) {
-    return _dio.put(path, data: data);
+  Future<Response> put(String path, {dynamic data, Options? options}) {
+    return _dio.put(path, data: data, options: options);
   }
 
-  Future<Response> patch(String path, {dynamic data}) {
-    return _dio.patch(path, data: data);
+  Future<Response> patch(String path, {dynamic data, Options? options}) {
+    return _dio.patch(path, data: data, options: options);
   }
 
-  Future<Response> delete(String path) {
-    return _dio.delete(path);
+  Future<Response> delete(String path, {Options? options}) {
+    return _dio.delete(path, options: options);
   }
 }

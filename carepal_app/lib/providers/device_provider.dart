@@ -30,7 +30,10 @@ class DeviceProvider with ChangeNotifier {
     notifyListeners();
 
     try {
-      _devices = await _service.getDeviceStatus();
+      final results = await _service.getDeviceStatus();
+      _devices = (results as List)
+          .map((i) => DeviceStatus.fromJson(i))
+          .toList();
     } catch (e) {
       _error = e.toString();
     } finally {

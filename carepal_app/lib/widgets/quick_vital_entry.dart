@@ -2,7 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../core/app_colors.dart';
 import '../providers/vitals_provider.dart';
-import '../providers/dashboard_provider.dart'; // Add DashboardProvider import to be safe
+import '../providers/dashboard_provider.dart';
+import '../providers/auth_provider.dart';
 
 class QuickVitalEntry extends StatefulWidget {
   const QuickVitalEntry({super.key});
@@ -182,6 +183,19 @@ class _QuickVitalEntryState extends State<QuickVitalEntry> {
 
   Future<void> _handleSubmit() async {
     final provider = context.read<VitalsProvider>();
+    final authProvider = context.read<AuthProvider>();
+    final user = authProvider.user;
+
+    // Assume patientId is user.id for now
+    final patientId = user != null ? user['id'] as int : null;
+
+    if (patientId == null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error: Not logged in')));
+      return;
+    }
+
     final vitalTypes = provider.vitalTypes;
 
     if (vitalTypes.isEmpty) {
@@ -196,6 +210,7 @@ class _QuickVitalEntryState extends State<QuickVitalEntry> {
       try {
         final bpType = provider.vitalTypes.firstWhere((vt) => vt.code == 'BP');
         await provider.createReading(
+          patientId: patientId,
           vitalTypeId: bpType.id,
           values: {
             'systolic': int.parse(_systolicController.text),
@@ -206,7 +221,6 @@ class _QuickVitalEntryState extends State<QuickVitalEntry> {
         );
         anySubmitted = true;
       } catch (e) {
-        // Handle error finding BP type or creating reading
         debugPrint('Error submit BP: $e');
       }
     }
@@ -216,6 +230,7 @@ class _QuickVitalEntryState extends State<QuickVitalEntry> {
       try {
         final hrType = provider.vitalTypes.firstWhere((vt) => vt.code == 'HR');
         await provider.createReading(
+          patientId: patientId,
           vitalTypeId: hrType.id,
           value: double.parse(_hrController.text),
           unit: 'bpm',
@@ -234,6 +249,7 @@ class _QuickVitalEntryState extends State<QuickVitalEntry> {
           (vt) => vt.code == 'SPO2',
         );
         await provider.createReading(
+          patientId: patientId,
           vitalTypeId: spo2Type.id,
           value: double.parse(_spo2Controller.text),
           unit: '%',
@@ -252,6 +268,7 @@ class _QuickVitalEntryState extends State<QuickVitalEntry> {
           (vt) => vt.code == 'TEMP',
         );
         await provider.createReading(
+          patientId: patientId,
           vitalTypeId: tempType.id,
           value: double.parse(_tempController.text),
           unit: '°F',
