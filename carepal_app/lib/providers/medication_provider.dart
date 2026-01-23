@@ -27,7 +27,7 @@ class MedicationProvider with ChangeNotifier {
 
     try {
       final results = await _service.getTodaysSchedule();
-      _todaysSchedule = (results as List)
+      _todaysSchedule = (results)
           .map((i) => MedicationSchedule.fromJson(i))
           .toList();
     } catch (e) {

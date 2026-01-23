@@ -470,8 +470,10 @@ class _ManualEntryScreenState extends State<ManualEntryScreen> {
     final authProvider = context.read<AuthProvider>();
     final user = authProvider.user;
 
-    // Assume patientId is user['id'] based on login response
-    final patientId = user != null ? user['id'] as int? : null;
+    // Use patient profile ID if available
+    final patientId = user != null && user['patient_profile'] != null
+        ? user['patient_profile']['id'] as int?
+        : null;
 
     if (patientId == null) {
       if (mounted) {

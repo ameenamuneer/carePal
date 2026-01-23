@@ -6,15 +6,27 @@ from .models import User
 class UserSerializer(serializers.ModelSerializer):
     """Basic user serializer"""
     age = serializers.ReadOnlyField()
+    patient_profile = serializers.SerializerMethodField()
     
     class Meta:
         model = User
         fields = [
             'id', 'username', 'email', 'phone_number', 'user_type',
             'first_name', 'last_name', 'date_of_birth', 'age',
-            'profile_picture', 'is_active', 'created_at', 'updated_at'
+            'profile_picture', 'is_active', 'created_at', 'updated_at',
+            'patient_profile'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_patient_profile(self, obj):
+        """Include patient profile data if user is a patient"""
+        if obj.user_type == 'PATIENT' and hasattr(obj, 'patient_profile'):
+            return {
+                'id': obj.patient_profile.id,
+                'gender': obj.patient_profile.gender,
+                'blood_group': obj.patient_profile.blood_group,
+            }
+        return None
 
 
 class UserRegistrationSerializer(serializers.ModelSerializer):

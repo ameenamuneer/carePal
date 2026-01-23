@@ -1,4 +1,3 @@
-import 'package:dio/dio.dart';
 import 'api_service.dart';
 
 /// Complete Device Service - Cloud Devices, Bluetooth, OAuth

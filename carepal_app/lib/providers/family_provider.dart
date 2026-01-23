@@ -28,8 +28,8 @@ class FamilyProvider with ChangeNotifier {
         _service.getFamilyInvitations(),
       ]);
 
-      final memberRes = results[0] as Map<String, dynamic>;
-      final inviteRes = results[1] as Map<String, dynamic>;
+      final memberRes = results[0];
+      final inviteRes = results[1];
 
       if (memberRes['results'] != null) {
         _members = (memberRes['results'] as List)
