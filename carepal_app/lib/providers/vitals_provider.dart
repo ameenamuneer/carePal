@@ -137,6 +137,11 @@ class VitalsProvider with ChangeNotifier {
         _vitalTypes = (response['results'] as List)
             .map((i) => VitalType.fromJson(i))
             .toList();
+
+        debugPrint('=== [DEBUG] Loaded ${_vitalTypes.length} Vital Types ===');
+        for (var t in _vitalTypes) {
+          debugPrint('Type: id=${t.id} code="${t.code}" name="${t.name}"');
+        }
       }
     } catch (e) {
       debugPrint('Error loading vital types silent: $e');
