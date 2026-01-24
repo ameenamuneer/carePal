@@ -8,6 +8,7 @@ import 'providers/medication_provider.dart';
 import 'providers/device_provider.dart';
 import 'providers/family_provider.dart';
 import 'providers/ai_agent_provider.dart';
+import 'providers/profile_provider.dart'; // Import ProfileProvider
 import 'screens/login_screen.dart';
 import 'screens/dashboard_screen.dart'; // Ensure DashboardScreen is imported for logic or home redirect
 import 'core/app_theme.dart'; // Using existing AppTheme
@@ -30,6 +31,7 @@ void main() async {
         ChangeNotifierProvider(create: (_) => DeviceProvider()),
         ChangeNotifierProvider(create: (_) => FamilyProvider()),
         ChangeNotifierProvider(create: (_) => AIAgentProvider()),
+        ChangeNotifierProvider(create: (_) => ProfileProvider()),
       ],
       child: const CarePalApp(),
     ),
