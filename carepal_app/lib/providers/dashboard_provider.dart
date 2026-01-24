@@ -1,3 +1,6 @@
+// lib/providers/dashboard_provider.dart
+// FIXED VERSION - Prevents setState during build
+
 import 'package:flutter/material.dart';
 import '../models/dashboard_data.dart';
 import '../services/dashboard_service.dart';
@@ -24,23 +27,43 @@ class DashboardProvider with ChangeNotifier {
 
   // Load dashboard
   Future<void> loadDashboard() async {
+    // CRITICAL FIX: Only set loading if not already loading
+    if (_isLoading) return;
+
     _isLoading = true;
     _error = null;
-    notifyListeners();
+
+    // CRITICAL FIX: Use post-frame callback to avoid build-time setState
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      notifyListeners();
+    });
 
     try {
       _dashboardData = await _service.getDashboard();
+      _error = null;
     } catch (e) {
       _error = e.toString();
+      debugPrint('Dashboard load error: $e');
     } finally {
       _isLoading = false;
-      notifyListeners();
+
+      // CRITICAL FIX: Use post-frame callback for final notification
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        notifyListeners();
+      });
     }
   }
 
-  // Refresh dashboard
+  // Refresh dashboard - silent version without notifying during load
   Future<void> refresh() async {
     await loadDashboard();
+  }
+
+  // SAFE refresh that can be called during build
+  void requestRefresh() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      loadDashboard();
+    });
   }
 
   // Get vital summary by code
@@ -51,6 +74,8 @@ class DashboardProvider with ChangeNotifier {
   // Clear error
   void clearError() {
     _error = null;
-    notifyListeners();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      notifyListeners();
+    });
   }
 }

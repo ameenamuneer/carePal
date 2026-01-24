@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'api_service.dart';
 
 /// EXPANDED Vitals Service - Complete Implementation
@@ -73,6 +74,8 @@ class VitalsService {
 
   /// Create new vital reading (manual entry)
   /// POST /api/v1/vitals/readings/
+  ///
+  /// FIXED VERSION - Ensures correct ISO 8601 date format
   Future<Map<String, dynamic>> createReading({
     required int patientId,
     required int vitalTypeId,
@@ -86,23 +89,56 @@ class VitalsService {
     String? notes,
   }) async {
     try {
-      final data = {
+      // CRITICAL FIX: Format date as ISO 8601 with 'Z' timezone indicator
+      final timestamp = measuredAt ?? DateTime.now();
+      final isoTimestamp = timestamp.toUtc().toIso8601String();
+
+      // CRITICAL FIX: Build data object with correct field types
+      final data = <String, dynamic>{
         'patient': patientId,
         'vital_type': vitalTypeId,
-        if (dataSourceId != null) 'data_source': dataSourceId,
-        if (value != null) 'value': value,
-        if (values != null) 'values': values,
         'unit': unit,
-        'measured_at': (measuredAt ?? DateTime.now()).toIso8601String(),
-        'source': source ?? 'MANUAL_ENTRY',
-        if (dataQuality != null) 'data_quality': dataQuality,
-        if (notes != null) 'notes': notes,
+        'measured_at': isoTimestamp,
       };
 
+      // Add optional data source
+      if (dataSourceId != null) {
+        data['data_source'] = dataSourceId;
+      }
+
+      // CRITICAL FIX: Only include value OR values, not both
+      if (values != null && values.isNotEmpty) {
+        data['values'] = values;
+      } else if (value != null) {
+        data['value'] = value;
+      } else {
+        throw Exception('Either value or values must be provided');
+      }
+
+      // Add optional fields
+      if (source != null && source.isNotEmpty) {
+        data['source'] = source;
+      } else {
+        data['source'] = 'MANUAL'; // Default to MANUAL for manual entries
+      }
+
+      if (dataQuality != null && dataQuality.isNotEmpty) {
+        data['data_quality'] = dataQuality;
+      }
+
+      if (notes != null && notes.isNotEmpty) {
+        data['notes'] = notes;
+      }
+
+      debugPrint('Creating vital reading with data: $data');
+
       final response = await _api.post('/api/v1/vitals/readings/', data: data);
+
+      debugPrint('Vital reading created successfully: ${response.data}');
       return response.data;
     } catch (e) {
-      throw Exception('Failed to create reading: $e');
+      debugPrint('Failed to create vital reading: $e');
+      throw Exception('Failed to create vital reading: $e');
     }
   }
 

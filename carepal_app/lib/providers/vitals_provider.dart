@@ -1,3 +1,6 @@
+// lib/providers/vitals_provider.dart
+// CRITICAL FIX - Prevents setState during build
+
 import 'package:flutter/material.dart';
 import '../models/vital_reading.dart';
 import '../services/vitals_service.dart';
@@ -17,16 +20,26 @@ class VitalsProvider with ChangeNotifier {
   bool get isLoading => _isLoading;
   String? get error => _error;
 
+  // CRITICAL FIX: Safe notification helper
+  void _safeNotify() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      notifyListeners();
+    });
+  }
+
   // Load vitals readings
-  // Accepts vitalsCode (String) for backward compatibility, finds ID
+  // Accepts vitalType (String) for backward compatibility, finds ID
   Future<void> loadReadings({
     int? vitalTypeId,
     String? vitalType,
     int days = 7,
   }) async {
+    // CRITICAL FIX: Only set loading if not already loading
+    if (_isLoading) return;
+
     _isLoading = true;
     _error = null;
-    notifyListeners();
+    _safeNotify(); // FIXED: Use post-frame callback
 
     try {
       // Resolve vitalTypeId if String code provided
@@ -37,13 +50,8 @@ class VitalsProvider with ChangeNotifier {
         }
         final type = _vitalTypes.firstWhere(
           (t) => t.code == vitalType,
-          orElse: () => VitalType(
-            id: -1,
-            name: '',
-            code: '',
-            unit: '',
-            category: '',
-          ), // Dummy
+          orElse: () =>
+              VitalType(id: -1, name: '', code: '', unit: '', category: ''),
         );
         if (type.id != -1) {
           resolvedTypeId = type.id;
@@ -67,11 +75,14 @@ class VitalsProvider with ChangeNotifier {
       } else {
         _readings = [];
       }
+
+      _error = null;
     } catch (e) {
       _error = e.toString();
+      debugPrint('Error loading vitals readings: $e');
     } finally {
       _isLoading = false;
-      notifyListeners();
+      _safeNotify(); // FIXED: Use post-frame callback
     }
   }
 
@@ -108,15 +119,13 @@ class VitalsProvider with ChangeNotifier {
           _latestReading = null;
         }
       } else {
-        // If no specific type requested, just take the very latest?
-        // Or if code not found.
         if (readings.isNotEmpty) _latestReading = readings.first;
       }
 
-      notifyListeners();
+      _safeNotify(); // FIXED: Use post-frame callback
     } catch (e) {
       _error = e.toString();
-      notifyListeners();
+      _safeNotify(); // FIXED: Use post-frame callback
     }
   }
 
@@ -130,7 +139,7 @@ class VitalsProvider with ChangeNotifier {
             .toList();
       }
     } catch (e) {
-      print('Error loading vital types silent: $e');
+      debugPrint('Error loading vital types silent: $e');
     }
   }
 
@@ -138,10 +147,10 @@ class VitalsProvider with ChangeNotifier {
   Future<void> loadVitalTypes() async {
     try {
       await _loadVitalTypesSilent();
-      notifyListeners();
+      _safeNotify(); // FIXED: Use post-frame callback
     } catch (e) {
       _error = e.toString();
-      notifyListeners();
+      _safeNotify(); // FIXED: Use post-frame callback
     }
   }
 
@@ -157,7 +166,7 @@ class VitalsProvider with ChangeNotifier {
   }) async {
     _isLoading = true;
     _error = null;
-    notifyListeners();
+    _safeNotify(); // FIXED: Use post-frame callback
 
     try {
       final response = await _service.createReading(
@@ -176,15 +185,17 @@ class VitalsProvider with ChangeNotifier {
       _readings.insert(0, reading);
       _latestReading = reading;
 
-      notifyListeners();
+      _error = null;
+      _safeNotify(); // FIXED: Use post-frame callback
       return true;
     } catch (e) {
       _error = e.toString();
-      notifyListeners();
+      debugPrint('Error creating vital reading: $e');
+      _safeNotify(); // FIXED: Use post-frame callback
       return false;
     } finally {
       _isLoading = false;
-      notifyListeners();
+      _safeNotify(); // FIXED: Use post-frame callback
     }
   }
 
@@ -203,8 +214,6 @@ class VitalsProvider with ChangeNotifier {
       if (type.id != -1) {
         return _readings.where((r) => r.vitalTypeId == type.id).toList();
       }
-      // Fallback: check if model has vitalCode property?
-      // assuming new VitalReading has vitalTypeId only, this fallback is weak.
       return [];
     }
     return [];
@@ -213,6 +222,13 @@ class VitalsProvider with ChangeNotifier {
   // Clear error
   void clearError() {
     _error = null;
-    notifyListeners();
+    _safeNotify(); // FIXED: Use post-frame callback
+  }
+
+  // CRITICAL FIX: Request refresh that can be called during build
+  void requestRefresh({int days = 7}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      loadReadings(days: days);
+    });
   }
 }

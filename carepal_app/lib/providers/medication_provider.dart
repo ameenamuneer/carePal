@@ -1,3 +1,6 @@
+// lib/providers/medication_provider.dart
+// CRITICAL FIX - Prevents setState during build
+
 import 'package:flutter/material.dart';
 import '../models/medication.dart';
 import '../services/medication_service.dart';
@@ -19,22 +22,34 @@ class MedicationProvider with ChangeNotifier {
   bool get isLoading => _isLoading;
   String? get error => _error;
 
+  // CRITICAL FIX: Safe notification helper
+  void _safeNotify() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      notifyListeners();
+    });
+  }
+
   // Load today's schedule
   Future<void> loadTodaysSchedule() async {
+    // CRITICAL FIX: Only set loading if not already loading
+    if (_isLoading) return;
+
     _isLoading = true;
     _error = null;
-    notifyListeners();
+    _safeNotify(); // FIXED: Use post-frame callback
 
     try {
       final results = await _service.getTodaysSchedule();
       _todaysSchedule = (results)
           .map((i) => MedicationSchedule.fromJson(i))
           .toList();
+      _error = null;
     } catch (e) {
       _error = e.toString();
+      debugPrint('Error loading today\'s schedule: $e');
     } finally {
       _isLoading = false;
-      notifyListeners();
+      _safeNotify(); // FIXED: Use post-frame callback
     }
   }
 
@@ -42,7 +57,7 @@ class MedicationProvider with ChangeNotifier {
   Future<void> loadMedications({String? status}) async {
     _isLoading = true;
     _error = null;
-    notifyListeners();
+    _safeNotify(); // FIXED: Use post-frame callback
 
     try {
       final response = await _service.getMedications(status: status);
@@ -51,11 +66,13 @@ class MedicationProvider with ChangeNotifier {
             .map((i) => Medication.fromJson(i))
             .toList();
       }
+      _error = null;
     } catch (e) {
       _error = e.toString();
+      debugPrint('Error loading medications: $e');
     } finally {
       _isLoading = false;
-      notifyListeners();
+      _safeNotify(); // FIXED: Use post-frame callback
     }
   }
 
@@ -63,7 +80,7 @@ class MedicationProvider with ChangeNotifier {
   Future<bool> markAsTaken(int adherenceId, {String? notes}) async {
     _isLoading = true;
     _error = null;
-    notifyListeners();
+    _safeNotify(); // FIXED: Use post-frame callback
 
     try {
       await _service.markAdherenceTaken(adherenceId: adherenceId, notes: notes);
@@ -81,15 +98,16 @@ class MedicationProvider with ChangeNotifier {
         );
       }
 
-      notifyListeners();
+      _error = null;
+      _safeNotify(); // FIXED: Use post-frame callback
       return true;
     } catch (e) {
       _error = e.toString();
-      notifyListeners();
+      _safeNotify(); // FIXED: Use post-frame callback
       return false;
     } finally {
       _isLoading = false;
-      notifyListeners();
+      _safeNotify(); // FIXED: Use post-frame callback
     }
   }
 
@@ -97,7 +115,7 @@ class MedicationProvider with ChangeNotifier {
   Future<bool> skipMedication(int adherenceId, String reason) async {
     _isLoading = true;
     _error = null;
-    notifyListeners();
+    _safeNotify(); // FIXED: Use post-frame callback
 
     try {
       await _service.markAdherenceSkipped(
@@ -117,25 +135,24 @@ class MedicationProvider with ChangeNotifier {
         );
       }
 
-      notifyListeners();
+      _error = null;
+      _safeNotify(); // FIXED: Use post-frame callback
       return true;
     } catch (e) {
       _error = e.toString();
-      notifyListeners();
+      _safeNotify(); // FIXED: Use post-frame callback
       return false;
     } finally {
       _isLoading = false;
-      notifyListeners();
+      _safeNotify(); // FIXED: Use post-frame callback
     }
   }
 
   // Load adherence history
   Future<void> loadAdherenceHistory({int? medicationId, int days = 30}) async {
     try {
-      // API uses pagination or date range, not days directly in top level
       final response = await _service.getAdherenceHistory(
         medicationId: medicationId,
-        // days: days // Removed as not supported in new service directly
       );
 
       if (response['results'] != null) {
@@ -144,10 +161,10 @@ class MedicationProvider with ChangeNotifier {
             .toList();
       }
 
-      notifyListeners();
+      _safeNotify(); // FIXED: Use post-frame callback
     } catch (e) {
       _error = e.toString();
-      notifyListeners();
+      _safeNotify(); // FIXED: Use post-frame callback
     }
   }
 
@@ -155,10 +172,11 @@ class MedicationProvider with ChangeNotifier {
   Future<void> loadAdherenceRate({int days = 7}) async {
     try {
       _adherenceRate = await _service.getAdherenceRate(days: days);
-      notifyListeners();
+      _safeNotify(); // FIXED: Use post-frame callback
     } catch (e) {
       _error = e.toString();
-      notifyListeners();
+      debugPrint('Error loading adherence rate: $e');
+      _safeNotify(); // FIXED: Use post-frame callback
     }
   }
 
@@ -175,6 +193,14 @@ class MedicationProvider with ChangeNotifier {
   // Clear error
   void clearError() {
     _error = null;
-    notifyListeners();
+    _safeNotify(); // FIXED: Use post-frame callback
+  }
+
+  // CRITICAL FIX: Request refresh that can be called during build
+  void requestRefresh() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      loadTodaysSchedule();
+      loadAdherenceRate();
+    });
   }
 }
