@@ -350,10 +350,48 @@ class MedicationAdherence(models.Model):
     @property
     def is_overdue(self):
         """Check if this dose is overdue"""
-        if self.status in ['TAKEN', 'SKIPPED']:
+        if self.status != 'SCHEDULED':
             return False
         
         return timezone.now() > self.scheduled_datetime
+    
+    @property
+    def current_status(self):
+        """
+        🤖 AI-FRIENDLY: Computed status (no periodic updates needed)
+        
+        Returns correct status based on current time.
+        AI agent calls this when checking.
+        """
+        now = timezone.now()
+        grace_period = timedelta(hours=1)
+        
+        # Already taken/skipped/missed - return as is
+        if self.status in ['TAKEN', 'SKIPPED', 'MISSED']:
+            return self.status
+        
+        # Scheduled - check if overdue
+        if self.status == 'SCHEDULED':
+            if self.scheduled_datetime < now - grace_period:
+                return 'OVERDUE'  # Virtual status for AI
+            elif self.scheduled_datetime < now:
+                return 'IN_GRACE_PERIOD'  # Within grace period
+            else:
+                return 'SCHEDULED'  # Future
+        
+        return self.status
+    
+    def mark_as_missed_if_overdue(self):
+        """
+        Call this when AI agent detects overdue
+        Only updates DB when actually needed
+        """
+        if self.is_overdue and self.status == 'SCHEDULED':
+            self.status = 'MISSED'
+            self.miss_reason = 'Marked as missed by AI agent after grace period'
+            self.save()
+            return True
+        return False
     
     @property
     def delay_minutes(self):

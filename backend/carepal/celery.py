@@ -24,21 +24,10 @@ app.conf.beat_schedule = {
         'schedule': crontab(hour=3, minute=0),  # Daily at 3 AM
     },
     # Medications tasks
-    'send-medication-reminders': {
-        'task': 'medications.tasks.send_medication_reminders',
-        'schedule': crontab(minute='*/5'),  # Every 5 minutes
-    },
-    'check-missed-medications': {
-        'task': 'medications.tasks.check_missed_medications',
-        'schedule': crontab(minute='*/30'),  # Every 30 minutes
-    },
-    'compute-adherence-patterns': {
-        'task': 'medications.tasks.compute_adherence_patterns',
-        'schedule': crontab(hour=3, minute=0),  # Daily at 3 AM
-    },
-    'check-refill-needs': {
-        'task': 'medications.tasks.check_refill_needs',
-        'schedule': crontab(hour=9, minute=0),  # Daily at 9 AM
+    # Medications tasks (MINIMAL - AI DRIVEN)
+    'prepare-next-day-medications': {
+        'task': 'medications.tasks.prepare_next_day_medications',
+        'schedule': crontab(hour=0, minute=0),  # Daily at midnight
     },
     # Devices tasks
     'sync-all-cloud-devices': {

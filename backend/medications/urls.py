@@ -6,7 +6,8 @@ from .views import (
     MedicationAdherenceViewSet,
     MedicationRefillViewSet,
     MedicationInteractionViewSet,
-    MedicationAdherencePatternViewSet
+    MedicationAdherencePatternViewSet,
+    AIAgentMedicationViewSet
 )
 
 app_name = 'medications'
@@ -18,6 +19,7 @@ router.register(r'adherence', MedicationAdherenceViewSet, basename='adherence')
 router.register(r'refills', MedicationRefillViewSet, basename='refill')
 router.register(r'interactions', MedicationInteractionViewSet, basename='interaction')
 router.register(r'patterns', MedicationAdherencePatternViewSet, basename='pattern')
+router.register(r'ai-medications', AIAgentMedicationViewSet, basename='ai-medication')
 
 urlpatterns = [
     path('', include(router.urls)),

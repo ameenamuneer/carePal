@@ -66,16 +66,22 @@ class MedicationViewSet(viewsets.ModelViewSet):
         return MedicationDetailSerializer
     
     def create(self, request, *args, **kwargs):
-        """Create medication and generate adherence records"""
+        """
+        Create medication and generate initial records
+        
+        Simplified: Just create today + next 7 days
+        Midnight task will handle future days
+        """
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         medication = serializer.save()
         
-        # Trigger adherence record generation
+        # Generate next 7 days (async)
         from .tasks import generate_adherence_records
-        generate_adherence_records.delay(medication.id, days=30)
+        generate_adherence_records.delay(medication.id, days=7)
         
-        # Return detailed view
+        logger.info(f"[MEDICATION] Created {medication.medication_name} (ID: {medication.id})")
+        
         output_serializer = MedicationDetailSerializer(medication)
         return Response(output_serializer.data, status=status.HTTP_201_CREATED)
     
@@ -646,3 +652,457 @@ class MedicationAdherencePatternViewSet(viewsets.ReadOnlyModelViewSet):
             )
         else:
             return MedicationAdherencePattern.objects.all()
+
+
+class AIAgentMedicationViewSet(viewsets.ViewSet):
+    """
+    🤖 AI AGENT SPECIALIZED ENDPOINTS
+    
+    These endpoints are optimized for AI agent interaction:
+    - Single calls return complete context
+    - Include suggested actions
+    - Minimal round-trips
+    - Natural language friendly
+    """
+    permission_classes = [IsAuthenticated]
+    
+    @action(detail=False, methods=['get'])
+    def check_now(self, request):
+        """
+        🤖 PRIMARY AI AGENT ENDPOINT
+        
+        GET /api/v1/ai-medications/check_now/?patient_id=1
+        
+        Returns everything AI needs in one call:
+        - Upcoming medications (next 2 hours)
+        - Overdue medications (past but not taken)
+        - Recently taken (last 4 hours)
+        - Today's summary
+        - Suggested action
+        
+        AI agent calls this:
+        - At start of every conversation
+        - Every 15-30 minutes during waking hours
+        - When patient asks about medications
+        """
+        patient_id = request.query_params.get('patient_id')
+        
+        if not patient_id:
+            # Try to get from authenticated user
+            if request.user.user_type == 'PATIENT':
+                patient = PatientProfile.objects.filter(user=request.user).first()
+                patient_id = patient.id if patient else None
+        
+        if not patient_id:
+            return Response(
+                {'error': 'patient_id is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        now = timezone.now()
+        today = now.date()
+        
+        # ========== UPCOMING (Next 2 hours) ==========
+        upcoming = MedicationAdherence.objects.filter(
+            medication__patient_id=patient_id,
+            status='SCHEDULED',
+            scheduled_datetime__gte=now,
+            scheduled_datetime__lte=now + timedelta(hours=2)
+        ).select_related('medication', 'schedule').order_by('scheduled_datetime')
+        
+        # ========== OVERDUE (Should have been taken) ==========
+        # Using computed property - no need to update DB
+        overdue = MedicationAdherence.objects.filter(
+            medication__patient_id=patient_id,
+            status='SCHEDULED',
+            scheduled_datetime__lt=now - timedelta(hours=1),  # 1 hour grace
+            scheduled_datetime__gte=now - timedelta(hours=4)  # Last 4 hours only
+        ).select_related('medication', 'schedule').order_by('scheduled_datetime')
+        
+        # ========== RECENTLY TAKEN ==========
+        recently_taken = MedicationAdherence.objects.filter(
+            medication__patient_id=patient_id,
+            status='TAKEN',
+            actual_datetime__gte=now - timedelta(hours=4)
+        ).select_related('medication', 'schedule').order_by('-actual_datetime')
+        
+        # ========== TODAY'S SUMMARY ==========
+        today_all = MedicationAdherence.objects.filter(
+            medication__patient_id=patient_id,
+            scheduled_date=today
+        )
+        
+        total_today = today_all.count()
+        taken_today = today_all.filter(status='TAKEN').count()
+        missed_today = today_all.filter(status='MISSED').count()
+        remaining_today = today_all.filter(status='SCHEDULED').count()
+        
+        # ========== SUGGESTED ACTION ==========
+        suggested_action = self._compute_ai_suggestion(upcoming, overdue)
+        
+        # ========== BUILD RESPONSE ==========
+        return Response({
+            'timestamp': now.isoformat(),
+            'patient_id': int(patient_id),
+            
+            # Critical data for AI agent
+            'upcoming': self._serialize_adherence_minimal(upcoming),
+            'overdue': self._serialize_adherence_minimal(overdue),
+            'recently_taken': self._serialize_adherence_minimal(recently_taken),
+            
+            # Context
+            'today_summary': {
+                'total': total_today,
+                'taken': taken_today,
+                'missed': missed_today,
+                'remaining': remaining_today,
+                'completion_rate': round((taken_today / total_today * 100), 1) if total_today > 0 else 0
+            },
+            
+            # AI action guidance
+            'needs_attention': overdue.filter(medication__is_critical=True).exists(),
+            'suggested_action': suggested_action,
+            
+            # Conversation starters for AI
+            'conversation_prompts': self._generate_prompts(
+                upcoming, overdue, taken_today, total_today
+            )
+        })
+    
+    def _serialize_adherence_minimal(self, queryset):
+        """Minimal serialization optimized for AI agent"""
+        return [
+            {
+                'adherence_id': adh.id,
+                'medication_id': adh.medication.id,
+                'medication_name': adh.medication.medication_name,
+                'dosage': adh.medication.dosage,
+                'form': adh.medication.form,
+                'scheduled_time': adh.scheduled_time.strftime('%H:%M'),
+                'scheduled_datetime': adh.scheduled_datetime.isoformat(),
+                'time_label': adh.schedule.time_label if adh.schedule else '',
+                'is_critical': adh.medication.is_critical,
+                'with_food': adh.schedule.with_food if adh.schedule else False,
+                'status': adh.status,
+                'actual_datetime': adh.actual_datetime.isoformat() if adh.actual_datetime else None
+            }
+            for adh in queryset
+        ]
+    
+    def _compute_ai_suggestion(self, upcoming, overdue):
+        """What should AI agent do right now?"""
+        now = timezone.now()
+        
+        # Priority 1: Critical overdue medications
+        critical_overdue = overdue.filter(medication__is_critical=True)
+        if critical_overdue.exists():
+            return {
+                'priority': 'CRITICAL',
+                'action': 'REMIND_CRITICAL_OVERDUE',
+                'urgency': 'high',
+                'medications': [
+                    {
+                        'name': m.medication.medication_name,
+                        'scheduled_time': m.scheduled_time.strftime('%H:%M'),
+                        'adherence_id': m.id
+                    }
+                    for m in critical_overdue
+                ],
+                'suggested_message': f"I notice you haven't taken your {critical_overdue.first().medication.medication_name}. This is an important medication. Have you taken it?"
+            }
+        
+        # Priority 2: Regular overdue medications
+        if overdue.exists():
+            return {
+                'priority': 'HIGH',
+                'action': 'REMIND_OVERDUE',
+                'urgency': 'medium',
+                'medications': [
+                    {
+                        'name': m.medication.medication_name,
+                        'scheduled_time': m.scheduled_time.strftime('%H:%M'),
+                        'adherence_id': m.id
+                    }
+                    for m in overdue
+                ],
+                'suggested_message': f"You have {overdue.count()} medication(s) that need to be taken. Would you like me to remind you?"
+            }
+        
+        # Priority 3: Upcoming medications (within 15 minutes)
+        if upcoming.exists():
+            next_med = upcoming.first()
+            minutes_until = int((next_med.scheduled_datetime - now).total_seconds() / 60)
+            
+            if minutes_until <= 15:
+                return {
+                    'priority': 'MEDIUM',
+                    'action': 'PRE_REMIND',
+                    'urgency': 'low',
+                    'medication': {
+                        'name': next_med.medication.medication_name,
+                        'scheduled_time': next_med.scheduled_time.strftime('%H:%M'),
+                        'minutes_until': minutes_until,
+                        'adherence_id': next_med.id
+                    },
+                    'suggested_message': f"In {minutes_until} minutes, it will be time to take your {next_med.medication.medication_name}."
+                }
+        
+        # Priority 4: All good
+        return {
+            'priority': 'LOW',
+            'action': 'NONE',
+            'urgency': 'none',
+            'suggested_message': 'All medications are on track. Great job!'
+        }
+    
+    def _generate_prompts(self, upcoming, overdue, taken_today, total_today):
+        """Generate conversation starter prompts for AI"""
+        prompts = []
+        
+        if overdue.exists():
+            prompts.append(f"I notice you have {overdue.count()} medication(s) to take. Is everything okay?")
+        
+        if taken_today > 0 and total_today > 0:
+            rate = round((taken_today / total_today * 100), 1)
+            if rate == 100:
+                prompts.append("You've taken all your medications today! Excellent work!")
+            elif rate >= 80:
+                prompts.append(f"You're doing well with your medications today - {rate}% complete!")
+        
+        if upcoming.exists():
+            next_med = upcoming.first()
+            prompts.append(f"Your next medication is {next_med.medication.medication_name} at {next_med.scheduled_time.strftime('%H:%M')}.")
+        
+        return prompts[:3]  # Return top 3 prompts
+    
+    @action(detail=False, methods=['post'])
+    def mark_status(self, request):
+        """
+        🤖 AI AGENT STATUS UPDATE ENDPOINT
+        
+        POST /api/v1/ai-medications/mark_status/
+        {
+            "adherence_id": 123,
+            "status": "TAKEN",  # or "MISSED", "SKIPPED"
+            "reason": "Patient confirmed via voice",
+            "timestamp": "2026-01-26T14:30:00Z"  # optional
+        }
+        
+        Returns: Updated adherence record
+        """
+        adherence_id = request.data.get('adherence_id')
+        new_status = request.data.get('status')
+        reason = request.data.get('reason', '')
+        timestamp_str = request.data.get('timestamp')
+        
+        # Validate
+        if not adherence_id or not new_status:
+            return Response(
+                {'error': 'adherence_id and status are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if new_status not in ['TAKEN', 'MISSED', 'SKIPPED']:
+            return Response(
+                {'error': 'status must be TAKEN, MISSED, or SKIPPED'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            adherence = MedicationAdherence.objects.select_related('medication').get(
+                id=adherence_id
+            )
+            
+            # Update status
+            adherence.status = new_status
+            
+            # Handle timestamp
+            if timestamp_str:
+                try:
+                    timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                except:
+                    timestamp = timezone.now()
+            else:
+                timestamp = timezone.now()
+            
+            # Status-specific updates
+            if new_status == 'TAKEN':
+                adherence.actual_datetime = timestamp
+                adherence.confirmed_by_patient = True
+                adherence.confirmation_method = 'ai_agent'
+                adherence.notes = reason or 'Confirmed via AI agent'
+                
+                # Update medication quantity
+                if adherence.medication.quantity_remaining:
+                    adherence.medication.quantity_remaining = max(
+                        0, adherence.medication.quantity_remaining - 1
+                    )
+                    adherence.medication.save()
+                    
+            elif new_status == 'SKIPPED':
+                adherence.skip_reason = reason or 'Skipped via AI agent'
+                adherence.notes = reason
+                
+            elif new_status == 'MISSED':
+                adherence.miss_reason = reason or 'Marked as missed by AI agent'
+                adherence.notes = reason
+            
+            adherence.save()
+            
+            logger.info(
+                f"[AI-AGENT] Marked adherence {adherence_id} as {new_status} "
+                f"for {adherence.medication.medication_name}"
+            )
+            
+            return Response({
+                'success': True,
+                'adherence_id': adherence_id,
+                'medication_name': adherence.medication.medication_name,
+                'status': new_status,
+                'timestamp': timestamp.isoformat(),
+                'quantity_remaining': adherence.medication.quantity_remaining
+            })
+            
+        except MedicationAdherence.DoesNotExist:
+            return Response(
+                {'error': f'Adherence record {adherence_id} not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+    
+    @action(detail=False, methods=['get'])
+    def patient_context(self, request):
+        """
+        🤖 AI AGENT CONTEXT ENDPOINT
+        
+        GET /api/v1/ai-medications/patient_context/?patient_id=1
+        
+        Returns complete patient medication context for AI conversations:
+        - All active medications with full details
+        - 7-day adherence summary
+        - Critical medications list
+        - Current adherence rate and performance
+        
+        AI agent calls this:
+        - At start of conversation
+        - When patient asks about their medications
+        - When generating health reports
+        """
+        patient_id = request.query_params.get('patient_id')
+        
+        if not patient_id:
+            if request.user.user_type == 'PATIENT':
+                patient = PatientProfile.objects.filter(user=request.user).first()
+                patient_id = patient.id if patient else None
+        
+        if not patient_id:
+            return Response(
+                {'error': 'patient_id is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Active medications
+        medications = Medication.objects.filter(
+            patient_id=patient_id,
+            status='ACTIVE'
+        ).prefetch_related('schedules')
+        
+        # 7-day adherence calculation
+        from .tasks import ai_compute_adherence_summary
+        adherence_summary = ai_compute_adherence_summary(patient_id, days=7)
+        
+        # Critical medications
+        critical_meds = medications.filter(is_critical=True)
+        
+        return Response({
+            'patient_id': int(patient_id),
+            'timestamp': timezone.now().isoformat(),
+            
+            # Medications
+            'active_medications': [
+                {
+                    'id': med.id,
+                    'name': med.medication_name,
+                    'dosage': med.dosage,
+                    'form': med.form,
+                    'frequency': med.frequency,
+                    'purpose': med.purpose,
+                    'is_critical': med.is_critical,
+                    'instructions': med.instructions,
+                    'schedules': [
+                        {
+                            'time': sch.time_of_day.strftime('%H:%M'),
+                            'label': sch.time_label,
+                            'with_food': sch.with_food
+                        }
+                        for sch in med.schedules.filter(is_active=True)
+                    ]
+                }
+                for med in medications
+            ],
+            
+            # Adherence summary
+            'adherence_summary': adherence_summary or {
+                'total': 0,
+                'rate': 0,
+                'performance': 'no_data'
+            },
+            
+            # Critical info
+            'critical_medications': [
+                {
+                    'name': med.medication_name,
+                    'dosage': med.dosage,
+                    'purpose': med.purpose
+                }
+                for med in critical_meds
+            ],
+            
+            # Stats
+            'stats': {
+                'total_active': medications.count(),
+                'total_critical': critical_meds.count(),
+                'total_doses_per_day': sum(
+                    med.schedules.filter(is_active=True).count()
+                    for med in medications
+                )
+            }
+        })
+    
+    @action(detail=False, methods=['post'])
+    def batch_mark_missed(self, request):
+        """
+        🤖 BATCH UPDATE ENDPOINT
+        
+        POST /api/v1/ai-medications/batch_mark_missed/
+        {
+            "adherence_ids": [123, 124, 125],
+            "reason": "AI agent detected overdue after grace period"
+        }
+        
+        Efficiently marks multiple medications as missed in one call
+        """
+        adherence_ids = request.data.get('adherence_ids', [])
+        reason = request.data.get('reason', 'Marked as missed by AI agent')
+        
+        if not adherence_ids:
+            return Response(
+                {'error': 'adherence_ids is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Batch update
+        updated = MedicationAdherence.objects.filter(
+            id__in=adherence_ids,
+            status='SCHEDULED'
+        ).update(
+            status='MISSED',
+            miss_reason=reason
+        )
+        
+        logger.info(f"[AI-AGENT] Batch marked {updated} medications as missed")
+        
+        return Response({
+            'success': True,
+            'updated_count': updated,
+            'adherence_ids': adherence_ids
+        })
