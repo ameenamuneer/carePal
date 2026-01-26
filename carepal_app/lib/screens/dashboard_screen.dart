@@ -13,11 +13,14 @@ import '../widgets/loading_shimmer.dart';
 import '../widgets/error_view.dart';
 import '../widgets/quick_vital_entry.dart';
 
+import 'package:permission_handler/permission_handler.dart';
+
 // Navigation Targets
 import 'medications/medications_screen.dart';
 import 'analytics/analytics_screen.dart';
 import 'profile/profile_screen.dart';
 import 'family/family_members_screen.dart';
+import 'admin_test_page.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -59,6 +62,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (mounted) {
         setState(() => _isInitializing = false);
       }
+      
+      // Request Bluetooth permissions
+      await _requestPermissions();
+
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -137,9 +144,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
         });
       },
       labelType: NavigationRailLabelType.all,
-      leading: const Padding(
-        padding: EdgeInsets.symmetric(vertical: 24),
-        child: CarePalLogo(size: 32, showText: false),
+      leading: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 24),
+        child: GestureDetector(
+          onLongPress: () {
+            print("DashboardScreen: Long Press Detected! Navigating to AdminTestPage...");
+            Navigator.push(
+              context,
+              MaterialPageRoute(builder: (context) => const AdminTestPage()),
+            );
+          },
+          child: const CarePalLogo(size: 32, showText: false),
+        ),
       ),
       destinations: const [
         NavigationRailDestination(
@@ -256,7 +272,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
       children: [
         // Only show logo text if no sidebar (mobile)
         if (MediaQuery.of(context).size.width < 900)
-          const CarePalLogo(size: 32, showText: true)
+          GestureDetector(
+            onLongPress: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const AdminTestPage()),
+              );
+            },
+            child: const CarePalLogo(size: 32, showText: true),
+          )
         else
           // Placeholder for spacing if needed
           const SizedBox.shrink(),
@@ -554,6 +578,22 @@ class _DashboardScreenState extends State<DashboardScreen> {
         );
       },
     );
+  }
+
+  Future<void> _requestPermissions() async {
+    // Android 12+ requires bluetoothScan and bluetoothConnect
+    // Android 11- requires location
+    Map<Permission, PermissionStatus> statuses = await [
+      Permission.bluetoothScan,
+      Permission.bluetoothConnect,
+      Permission.location,
+    ].request();
+
+    if (statuses[Permission.bluetoothScan]?.isDenied == true || 
+        statuses[Permission.bluetoothConnect]?.isDenied == true) {
+       // Ideally show dialog to user explaining why
+       debugPrint("Bluetooth permissions denied");
+    }
   }
 
   Widget _buildMedStat(String label, String value) {

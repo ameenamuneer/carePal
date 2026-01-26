@@ -9,6 +9,7 @@ import 'providers/device_provider.dart';
 import 'providers/family_provider.dart';
 import 'providers/ai_agent_provider.dart';
 import 'providers/profile_provider.dart'; // Import ProfileProvider
+import 'services/ble_servo_service.dart';
 import 'screens/login_screen.dart';
 import 'screens/dashboard_screen.dart'; // Ensure DashboardScreen is imported for logic or home redirect
 import 'core/app_theme.dart'; // Using existing AppTheme
@@ -32,6 +33,7 @@ void main() async {
         ChangeNotifierProvider(create: (_) => FamilyProvider()),
         ChangeNotifierProvider(create: (_) => AIAgentProvider()),
         ChangeNotifierProvider(create: (_) => ProfileProvider()),
+        ChangeNotifierProvider(create: (_) => BleServoService()),
       ],
       child: const CarePalApp(),
     ),
