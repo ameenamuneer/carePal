@@ -62,7 +62,7 @@ class DashboardDebugger {
       final dashboardData = await dashboardService.getDashboard();
       print('✅ DashboardService loaded successfully');
       print('Has vitals summary: ${dashboardData.vitalsSummary != null}');
-      print('Vitals in summary: ${dashboardData.vitalsSummary!.keys.toList()}');
+      print('Vitals in summary: ${dashboardData.vitalsSummary.keys.toList()}');
     } catch (e) {
       print('❌ ERROR loading via DashboardService:');
       print(e.toString());

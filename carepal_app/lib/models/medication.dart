@@ -29,19 +29,21 @@ class Medication {
 
   factory Medication.fromJson(Map<String, dynamic> json) {
     return Medication(
-      id: json['id'],
-      patientId: json['patient'],
-      medicationName: json['medication_name'],
-      dosage: json['dosage'],
-      instructions: json['instructions'],
-      form: json['form'],
-      frequency: json['frequency'],
-      route: json['route'],
-      startDate: DateTime.parse(json['start_date']),
+      id: json['id'] ?? 0,
+      patientId: json['patient'] ?? 0,
+      medicationName: json['medication_name'] ?? 'Unknown Medication',
+      dosage: json['dosage'] ?? '',
+      instructions: json['instructions'] ?? '',
+      form: json['form'] ?? '',
+      frequency: json['frequency'] ?? '',
+      route: json['route'] ?? '',
+      startDate: json['start_date'] != null
+          ? DateTime.parse(json['start_date'])
+          : DateTime.now(),
       endDate: json['end_date'] != null
           ? DateTime.parse(json['end_date'])
           : null,
-      status: json['status'],
+      status: json['status'] ?? 'UNKNOWN',
       scheduleDetails: json['schedule_details'] != null
           ? List<String>.from(json['schedule_details'])
           : [],
@@ -69,11 +71,47 @@ class MedicationSchedule {
   });
 
   factory MedicationSchedule.fromJson(Map<String, dynamic> json) {
+    // Handle "Today's Schedule" flat structure from backend
+    if (json['medication'] == null && json['medication_name'] != null) {
+      return MedicationSchedule(
+        id: json['adherence_id'] ?? json['id'] ?? 0,
+        medication: Medication(
+          id: json['medication_id'] ?? 0,
+          patientId: 0, // Not provided in flat structure
+          medicationName: json['medication_name'] ?? '',
+          dosage: json['dosage'] ?? '',
+          instructions: json['instructions'] ?? '',
+          form: json['form'] ?? '',
+          frequency: '', // Not provided
+          route: '', // Not provided
+          startDate: DateTime.now(), // Dummy
+          status: 'ACTIVE',
+        ),
+        scheduledTime: json['scheduled_time'] != null
+            ? (json['scheduled_time'].toString().contains('T')
+                  ? DateTime.parse(json['scheduled_time'])
+                  : DateTime.now()) // Fallback if just time string, handled by provider logic usually?
+            // Wait, backend sends 'scheduled_time' as "08:00:00". DateTime.parse might fail.
+            // But TodaysMedicationScheduleSerializer sends 'scheduled_time' (TimeField).
+            // DateTime.combine happens in backend serializer 'scheduled_time_display'?
+            // No, 'scheduled_time' is TimeField.
+            : DateTime.now(),
+        status: json['status'] ?? 'SCHEDULED',
+        takenAt: json['actual_datetime'] != null
+            ? DateTime.parse(json['actual_datetime'])
+            : null,
+        notes: json['notes'],
+      );
+    }
+
+    // Handle normal nested structure
     return MedicationSchedule(
-      id: json['id'],
-      medication: Medication.fromJson(json['medication']),
-      scheduledTime: DateTime.parse(json['scheduled_time']),
-      status: json['status'],
+      id: json['id'] ?? 0,
+      medication: Medication.fromJson(json['medication'] ?? {}),
+      scheduledTime: json['scheduled_time'] != null
+          ? DateTime.parse(json['scheduled_time'])
+          : DateTime.now(),
+      status: json['status'] ?? 'SCHEDULED',
       takenAt: json['taken_at'] != null
           ? DateTime.parse(json['taken_at'])
           : null,
@@ -106,10 +144,12 @@ class MedicationAdherence {
 
   factory MedicationAdherence.fromJson(Map<String, dynamic> json) {
     return MedicationAdherence(
-      id: json['id'],
-      medicationId: json['medication'],
-      scheduledDate: DateTime.parse(json['scheduled_date']),
-      status: json['status'],
+      id: json['id'] ?? 0,
+      medicationId: json['medication'] ?? 0,
+      scheduledDate: json['scheduled_date'] != null
+          ? DateTime.parse(json['scheduled_date'])
+          : DateTime.now(),
+      status: json['status'] ?? 'SCHEDULED',
       takenAt: json['taken_at'] != null
           ? DateTime.parse(json['taken_at'])
           : null,

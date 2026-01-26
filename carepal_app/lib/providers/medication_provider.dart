@@ -171,7 +171,10 @@ class MedicationProvider with ChangeNotifier {
   // Load adherence rate
   Future<void> loadAdherenceRate({int days = 7}) async {
     try {
-      _adherenceRate = await _service.getAdherenceRate(days: days);
+      final result = await _service.getAdherenceRate(days: days);
+      if (result['adherence_rate'] != null) {
+        _adherenceRate = (result['adherence_rate'] as num).toDouble();
+      }
       _safeNotify(); // FIXED: Use post-frame callback
     } catch (e) {
       _error = e.toString();
@@ -196,11 +199,38 @@ class MedicationProvider with ChangeNotifier {
     _safeNotify(); // FIXED: Use post-frame callback
   }
 
+  // Add new medication
+  Future<bool> addMedication(Map<String, dynamic> data) async {
+    _isLoading = true;
+    _error = null;
+    _safeNotify();
+
+    try {
+      await _service.createMedication(data);
+
+      // Reload data to reflect changes
+      await loadMedications();
+      await loadTodaysSchedule();
+
+      _error = null;
+      _safeNotify();
+      return true;
+    } catch (e) {
+      _error = e.toString();
+      _safeNotify();
+      return false;
+    } finally {
+      _isLoading = false;
+      _safeNotify();
+    }
+  }
+
   // CRITICAL FIX: Request refresh that can be called during build
   void requestRefresh() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       loadTodaysSchedule();
       loadAdherenceRate();
+      loadMedications(); // Also reload medications list
     });
   }
 }

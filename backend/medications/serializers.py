@@ -3,163 +3,362 @@ from django.utils import timezone
 from datetime import datetime, timedelta
 from .models import (
     Medication, MedicationSchedule, MedicationAdherence,
-    MedicationEscalation, MedicationInteraction, MedicationRefill,
-    MedicationAdherencePattern
+    MedicationRefill, MedicationInteraction, MedicationAdherencePattern,
+    MedicationEscalation
 )
 
 
 class MedicationScheduleSerializer(serializers.ModelSerializer):
-    """Serializer for medication schedules"""
-    
-    should_remind_today = serializers.ReadOnlyField()
+    """
+    Medication schedule with time-based information
+    """
+    time_of_day_display = serializers.SerializerMethodField()
     
     class Meta:
         model = MedicationSchedule
         fields = [
-            'id', 'time_of_day', 'time_label', 'days_of_week',
-            'with_food', 'on_empty_stomach', 'reminder_enabled',
-            'reminder_advance_minutes', 'is_active', 'should_remind_today',
-            'created_at'
-        ]
-        read_only_fields = ['id', 'created_at']
-
-
-class MedicationSerializer(serializers.ModelSerializer):
-    """Full medication serializer"""
-    
-    schedules = MedicationScheduleSerializer(many=True, read_only=True)
-    patient_name = serializers.CharField(source='patient.user.get_full_name', read_only=True)
-    is_active = serializers.ReadOnlyField()
-    needs_refill = serializers.ReadOnlyField()
-    days_remaining = serializers.SerializerMethodField()
-    
-    class Meta:
-        model = Medication
-        fields = [
-            'id', 'patient', 'patient_name', 'medication_name', 'generic_name',
-            'brand_name', 'dosage', 'form', 'route', 'frequency', 'times_per_day',
-            'start_date', 'end_date', 'duration_days', 'instructions',
-            'special_instructions', 'prescribed_by', 'prescription_number',
-            'prescribed_date', 'quantity_prescribed', 'quantity_remaining',
-            'refills_allowed', 'refills_remaining', 'status',
-            'discontinuation_reason', 'discontinued_by', 'discontinued_at',
-            'side_effects', 'interactions', 'purpose', 'is_critical',
-            'schedules', 'is_active', 'needs_refill', 'days_remaining',
-            'created_by', 'created_at', 'updated_at'
+            'id', 'medication', 'time_of_day', 'time_of_day_display',
+            'time_label', 'with_food', 'special_instructions',
+            'reminder_enabled', 'reminder_minutes_before',
+            'is_active', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
     
-    def get_days_remaining(self, obj):
-        """Calculate days remaining until end date"""
-        if obj.end_date:
-            today = timezone.now().date()
-            if obj.end_date > today:
-                return (obj.end_date - today).days
+    def get_time_of_day_display(self, obj):
+        """Format time in 12-hour format"""
+        if obj.time_of_day:
+            return obj.time_of_day.strftime('%I:%M %p')
         return None
 
 
-class MedicationCreateSerializer(serializers.ModelSerializer):
-    """Simplified serializer for creating medications"""
-    
-    schedules = MedicationScheduleSerializer(many=True, required=False)
-    
-    class Meta:
-        model = Medication
-        fields = [
-            'patient', 'medication_name', 'generic_name', 'brand_name',
-            'dosage', 'form', 'route', 'frequency', 'times_per_day',
-            'start_date', 'end_date', 'duration_days', 'instructions',
-            'special_instructions', 'prescribed_by', 'prescription_number',
-            'prescribed_date', 'quantity_prescribed', 'refills_allowed',
-            'side_effects', 'interactions', 'purpose', 'is_critical',
-            'schedules'
-        ]
-    
-    def create(self, validated_data):
-        schedules_data = validated_data.pop('schedules', [])
-        
-        # Set created_by
-        validated_data['created_by'] = self.context['request'].user
-        validated_data['refills_remaining'] = validated_data.get('refills_allowed', 0)
-        
-        medication = Medication.objects.create(**validated_data)
-        
-        # Create schedules
-        for schedule_data in schedules_data:
-            MedicationSchedule.objects.create(medication=medication, **schedule_data)
-        
-        return medication
-
-
 class MedicationListSerializer(serializers.ModelSerializer):
-    """Lightweight serializer for listing medications"""
-    
+    """
+    Simplified medication serializer for list views
+    """
     patient_name = serializers.CharField(source='patient.user.get_full_name', read_only=True)
-    is_active = serializers.ReadOnlyField()
+    schedule_count = serializers.SerializerMethodField()
     next_dose_time = serializers.SerializerMethodField()
+    adherence_rate_7d = serializers.SerializerMethodField()
     
     class Meta:
         model = Medication
         fields = [
-            'id', 'patient_name', 'medication_name', 'dosage', 'form',
-            'frequency', 'start_date', 'end_date', 'status',
-            'is_active', 'is_critical', 'next_dose_time'
+            'id', 'patient', 'patient_name', 'medication_name',
+            'dosage', 'form', 'route', 'frequency', 'status',
+            'is_critical', 'quantity_remaining', 'quantity_prescribed',
+            'start_date', 'end_date', 'schedule_count',
+            'next_dose_time', 'adherence_rate_7d'
         ]
+    
+    def get_schedule_count(self, obj):
+        """Get number of active schedules"""
+        return obj.schedules.filter(is_active=True).count()
     
     def get_next_dose_time(self, obj):
-        """Get next scheduled dose time"""
-        next_schedule = MedicationAdherence.objects.filter(
+        """Get next scheduled dose datetime"""
+        next_adherence = MedicationAdherence.objects.filter(
             medication=obj,
             status='SCHEDULED',
             scheduled_datetime__gte=timezone.now()
         ).order_by('scheduled_datetime').first()
         
-        if next_schedule:
-            return next_schedule.scheduled_datetime
+        if next_adherence:
+            return next_adherence.scheduled_datetime.isoformat()
         return None
-
-
-class MedicationAdherenceSerializer(serializers.ModelSerializer):
-    """Full adherence record serializer"""
     
+    def get_adherence_rate_7d(self, obj):
+        """Calculate 7-day adherence rate"""
+        end_date = timezone.now()
+        start_date = end_date - timedelta(days=7)
+        
+        records = MedicationAdherence.objects.filter(
+            medication=obj,
+            scheduled_datetime__gte=start_date,
+            scheduled_datetime__lte=end_date
+        )
+        
+        total = records.count()
+        if total == 0:
+            return None
+        
+        taken = records.filter(status='TAKEN').count()
+        return round((taken / total) * 100, 1)
+
+
+class MedicationDetailSerializer(serializers.ModelSerializer):
+    """
+    Complete medication details with all related data
+    """
+    patient_name = serializers.CharField(source='patient.user.get_full_name', read_only=True)
+    schedules = MedicationScheduleSerializer(many=True, read_only=True)
+    needs_refill = serializers.BooleanField(read_only=True)
+    days_until_empty = serializers.SerializerMethodField()
+    adherence_summary = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Medication
+        fields = [
+            'id', 'patient', 'patient_name', 'medication_name',
+            'generic_name', 'dosage', 'form', 'route', 'frequency',
+            'purpose', 'instructions', 'side_effects',
+            'interactions', 'is_critical',
+            'quantity_prescribed', 'quantity_remaining',
+            'start_date', 'end_date', 'status', 'prescribed_by',
+            'discontinued_by', 'discontinued_at', 'discontinuation_reason',
+            'schedules', 'needs_refill', 'days_until_empty',
+            'adherence_summary', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'discontinued_at']
+    
+    def get_days_until_empty(self, obj):
+        """Calculate days until medication runs out"""
+        if not obj.quantity_remaining or not obj.schedules.exists():
+            return None
+        
+        # Calculate daily consumption
+        active_schedules = obj.schedules.filter(is_active=True).count()
+        if active_schedules == 0:
+            return None
+        
+        # Assuming each schedule is one dose
+        daily_consumption = active_schedules
+        if daily_consumption == 0:
+            return None
+        
+        return int(obj.quantity_remaining / daily_consumption)
+    
+    def get_adherence_summary(self, obj):
+        """Get comprehensive adherence summary"""
+        end_date = timezone.now()
+        
+        # 7-day summary
+        start_7d = end_date - timedelta(days=7)
+        records_7d = MedicationAdherence.objects.filter(
+            medication=obj,
+            scheduled_datetime__gte=start_7d,
+            scheduled_datetime__lte=end_date
+        )
+        
+        # 30-day summary
+        start_30d = end_date - timedelta(days=30)
+        records_30d = MedicationAdherence.objects.filter(
+            medication=obj,
+            scheduled_datetime__gte=start_30d,
+            scheduled_datetime__lte=end_date
+        )
+        
+        def calculate_stats(records):
+            total = records.count()
+            if total == 0:
+                return None
+            
+            taken = records.filter(status='TAKEN').count()
+            missed = records.filter(status='MISSED').count()
+            skipped = records.filter(status='SKIPPED').count()
+            
+            return {
+                'total': total,
+                'taken': taken,
+                'missed': missed,
+                'skipped': skipped,
+                'rate': round((taken / total) * 100, 1)
+            }
+        
+        return {
+            'last_7_days': calculate_stats(records_7d),
+            'last_30_days': calculate_stats(records_30d)
+        }
+
+
+class MedicationCreateUpdateSerializer(serializers.ModelSerializer):
+    """
+    Serializer for creating and updating medications
+    """
+    schedules = MedicationScheduleSerializer(many=True, required=False)
+    
+    class Meta:
+        model = Medication
+        fields = [
+            'patient', 'medication_name', 'generic_name', 'dosage',
+            'form', 'route', 'frequency', 'purpose', 'instructions',
+            'form', 'route', 'frequency', 'purpose', 'instructions',
+            'side_effects', 'interactions',
+            'is_critical', 'quantity_prescribed',
+            'quantity_remaining', 'start_date',
+            'end_date', 'prescribed_by', 'schedules'
+        ]
+    
+    def create(self, validated_data):
+        """Create medication with schedules"""
+        schedules_data = validated_data.pop('schedules', [])
+        medication = Medication.objects.create(**validated_data)
+        
+        # Create schedules
+        for schedule_data in schedules_data:
+            MedicationSchedule.objects.create(
+                medication=medication,
+                **schedule_data
+            )
+        
+        return medication
+    
+    def update(self, instance, validated_data):
+        """Update medication and optionally schedules"""
+        schedules_data = validated_data.pop('schedules', None)
+        
+        # Update medication fields
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        
+        # Update schedules if provided
+        if schedules_data is not None:
+            # Delete old schedules
+            instance.schedules.all().delete()
+            
+            # Create new schedules
+            for schedule_data in schedules_data:
+                MedicationSchedule.objects.create(
+                    medication=instance,
+                    **schedule_data
+                )
+        
+        return instance
+
+
+class MedicationAdherenceDetailSerializer(serializers.ModelSerializer):
+    """
+    Detailed adherence record with full medication info
+    """
     medication_name = serializers.CharField(source='medication.medication_name', read_only=True)
-    is_overdue = serializers.ReadOnlyField()
-    delay_minutes = serializers.ReadOnlyField()
+    medication_dosage = serializers.CharField(source='medication.dosage', read_only=True)
+    medication_form = serializers.CharField(source='medication.form', read_only=True)
+    medication_is_critical = serializers.BooleanField(source='medication.is_critical', read_only=True)
+    
+    schedule_time_label = serializers.CharField(source='schedule.time_label', read_only=True)
+    schedule_with_food = serializers.BooleanField(source='schedule.with_food', read_only=True)
+    schedule_special_instructions = serializers.CharField(source='schedule.special_instructions', read_only=True)
+    
+    is_overdue = serializers.BooleanField(read_only=True)
+    delay_minutes = serializers.IntegerField(read_only=True)
+    scheduled_datetime_display = serializers.SerializerMethodField()
+    actual_datetime_display = serializers.SerializerMethodField()
     
     class Meta:
         model = MedicationAdherence
         fields = [
-            'id', 'medication', 'medication_name', 'schedule',
+            'id', 'medication', 'medication_name', 'medication_dosage',
+            'medication_form', 'medication_is_critical', 'schedule',
+            'schedule_time_label', 'schedule_with_food', 'schedule_special_instructions',
             'scheduled_date', 'scheduled_time', 'scheduled_datetime',
-            'actual_datetime', 'status', 'confirmed_by_patient',
-            'confirmation_method', 'skip_reason', 'miss_reason',
-            'notes', 'side_effects_reported', 'reminder_sent_at',
-            'reminder_count', 'is_overdue', 'delay_minutes',
+            'scheduled_datetime_display', 'actual_datetime', 'actual_datetime_display',
+            'status', 'confirmed_by_patient', 'confirmation_method',
+            'skip_reason', 'miss_reason', 'notes', 'side_effects_reported',
+            'reminder_sent_at', 'reminder_count', 'is_overdue', 'delay_minutes',
             'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
-
-
-class MedicationAdherenceUpdateSerializer(serializers.ModelSerializer):
-    """Serializer for updating adherence status"""
     
-    class Meta:
-        model = MedicationAdherence
-        fields = [
-            'status', 'actual_datetime', 'confirmed_by_patient',
-            'confirmation_method', 'skip_reason', 'notes',
-            'side_effects_reported'
-        ]
+    def get_scheduled_datetime_display(self, obj):
+        """Format scheduled datetime"""
+        if obj.scheduled_datetime:
+            return obj.scheduled_datetime.strftime('%I:%M %p')
+        return None
     
-    def validate_status(self, value):
-        """Validate status transitions"""
-        instance = self.instance
-        if instance and instance.status == 'TAKEN' and value != 'TAKEN':
-            raise serializers.ValidationError(
-                "Cannot change status once medication is marked as taken"
-            )
-        return value
+    def get_actual_datetime_display(self, obj):
+        """Format actual datetime"""
+        if obj.actual_datetime:
+            return obj.actual_datetime.strftime('%I:%M %p')
+        return None
 
+
+class TodaysMedicationScheduleSerializer(serializers.Serializer):
+    """
+    Today's medication schedule with all necessary details for frontend
+    """
+    adherence_id = serializers.IntegerField()
+    medication_id = serializers.IntegerField()
+    medication_name = serializers.CharField()
+    dosage = serializers.CharField()
+    form = serializers.CharField()
+    instructions = serializers.CharField(allow_blank=True)
+    
+    scheduled_time = serializers.TimeField()
+    scheduled_time_display = serializers.SerializerMethodField()
+    time_label = serializers.CharField()
+    with_food = serializers.BooleanField()
+    special_instructions = serializers.CharField(allow_blank=True)
+    
+    is_critical = serializers.BooleanField()
+    status = serializers.CharField()
+    actual_datetime = serializers.DateTimeField(allow_null=True)
+    notes = serializers.CharField(allow_blank=True)
+    is_overdue = serializers.BooleanField()
+    
+    # Additional helper fields
+    can_take = serializers.SerializerMethodField()
+    status_color = serializers.SerializerMethodField()
+    status_icon = serializers.SerializerMethodField()
+    
+    def get_scheduled_time_display(self, obj):
+        """Format time in 12-hour format"""
+        time = obj.get('scheduled_time')
+        if time:
+            dt = datetime.combine(datetime.today(), time)
+            return dt.strftime('%I:%M %p')
+        return None
+    
+    def get_can_take(self, obj):
+        """Determine if medication can be marked as taken"""
+        status = obj.get('status')
+        return status == 'SCHEDULED'
+    
+    def get_status_color(self, obj):
+        """Get color for status badge"""
+        status = obj.get('status')
+        color_map = {
+            'TAKEN': '#10B981',      # Green
+            'MISSED': '#EF4444',     # Red
+            'SKIPPED': '#6B7280',    # Gray
+            'SCHEDULED': '#F59E0B'   # Amber
+        }
+        return color_map.get(status, '#6B7280')
+    
+    def get_status_icon(self, obj):
+        """Get icon name for status"""
+        status = obj.get('status')
+        icon_map = {
+            'TAKEN': 'check_circle',
+            'MISSED': 'cancel',
+            'SKIPPED': 'block',
+            'SCHEDULED': 'schedule'
+        }
+        return icon_map.get(status, 'help')
+
+
+class AdherenceRateSerializer(serializers.Serializer):
+    """
+    Adherence rate calculation response
+    """
+    period_days = serializers.IntegerField()
+    start_date = serializers.DateField()
+    end_date = serializers.DateField()
+    
+    total_scheduled = serializers.IntegerField()
+    total_taken = serializers.IntegerField()
+    total_missed = serializers.IntegerField()
+    total_skipped = serializers.IntegerField()
+    
+    adherence_rate = serializers.FloatField()
+    completion_rate = serializers.FloatField()
+    
+    # Trend data
+    daily_breakdown = serializers.ListField(child=serializers.DictField(), required=False)
+
+
+# ==========================================
+# Legacy/Auxiliary Serializers (Preserved)
+# ==========================================
 
 class MedicationEscalationSerializer(serializers.ModelSerializer):
     """Serializer for escalation records"""
@@ -229,23 +428,3 @@ class MedicationAdherencePatternSerializer(serializers.ModelSerializer):
             'consecutive_misses_max', 'average_delay_minutes',
             'insights', 'recommendations', 'computed_at'
         ]
-
-
-class DailyMedicationScheduleSerializer(serializers.Serializer):
-    """Serializer for daily medication schedule view"""
-    
-    medication_id = serializers.IntegerField()
-    medication_name = serializers.CharField()
-    dosage = serializers.CharField()
-    form = serializers.CharField()
-    instructions = serializers.CharField()
-    is_critical = serializers.BooleanField()
-    
-    scheduled_time = serializers.TimeField()
-    time_label = serializers.CharField()
-    with_food = serializers.BooleanField()
-    
-    adherence_id = serializers.IntegerField(allow_null=True)
-    status = serializers.CharField()
-    actual_datetime = serializers.DateTimeField(allow_null=True)
-    is_overdue = serializers.BooleanField()

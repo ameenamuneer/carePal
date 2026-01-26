@@ -7,6 +7,7 @@ import '../../widgets/loading_shimmer.dart';
 import '../../widgets/error_view.dart';
 import '../../widgets/empty_state.dart';
 import 'medication_detail_screen.dart';
+import 'add_medication_screen.dart';
 
 class MedicationsScreen extends StatefulWidget {
   const MedicationsScreen({super.key});
@@ -45,6 +46,16 @@ class _MedicationsScreenState extends State<MedicationsScreen>
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.background,
+      floatingActionButton: FloatingActionButton(
+        onPressed: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const AddMedicationScreen()),
+          );
+        },
+        backgroundColor: AppColors.primary,
+        child: const Icon(Icons.add, color: Colors.white),
+      ),
       appBar: AppBar(
         backgroundColor: AppColors.surface,
         elevation: 0,

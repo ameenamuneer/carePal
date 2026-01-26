@@ -1,34 +1,11 @@
 import 'api_service.dart';
 
-/// EXPANDED Medication Service - Complete Implementation
-/// Maps to ALL endpoints in backend/medications/views.py
-///
-/// ✅ Existing endpoints preserved (from original file)
-/// ➕ NEW endpoints added based on backend code
 class MedicationService {
   final ApiService _api = ApiService();
 
-  // ==================== EXISTING ENDPOINTS (PRESERVED) ====================
+  // ==================== MEDICATIONS ====================
 
-  /// Get today's medication schedule
-  /// GET /api/v1/medications/adherence/today/
-  Future<List<dynamic>> getTodaysSchedule({int? patientId}) async {
-    try {
-      final queryParams = <String, dynamic>{
-        if (patientId != null) 'patient_id': patientId,
-      };
-
-      final response = await _api.get(
-        '/api/v1/medications/adherence/today/',
-        queryParameters: queryParams,
-      );
-      return response.data as List;
-    } catch (e) {
-      throw Exception('Failed to load today\'s schedule: $e');
-    }
-  }
-
-  /// Get all medications with optional status filter
+  /// Get all medications with filters
   /// GET /api/v1/medications/medications/
   Future<Map<String, dynamic>> getMedications({
     String? status,
@@ -60,7 +37,193 @@ class MedicationService {
     }
   }
 
-  /// Mark medication adherence as taken
+  /// Get single medication with full details
+  /// GET /api/v1/medications/medications/{id}/
+  Future<Map<String, dynamic>> getMedication(int id) async {
+    try {
+      final response = await _api.get('/api/v1/medications/medications/$id/');
+      return response.data;
+    } catch (e) {
+      throw Exception('Failed to load medication: $e');
+    }
+  }
+
+  /// Get active medications
+  /// GET /api/v1/medications/medications/active/
+  Future<List<dynamic>> getActiveMedications({int? patientId}) async {
+    try {
+      final queryParams = <String, dynamic>{
+        if (patientId != null) 'patient_id': patientId,
+      };
+
+      final response = await _api.get(
+        '/api/v1/medications/medications/active/',
+        queryParameters: queryParams,
+      );
+      return response.data as List;
+    } catch (e) {
+      throw Exception('Failed to load active medications: $e');
+    }
+  }
+
+  /// Get medications that need refill
+  /// GET /api/v1/medications/medications/needs_refill/
+  Future<List<dynamic>> getMedicationsNeedingRefill() async {
+    try {
+      final response = await _api.get(
+        '/api/v1/medications/medications/needs_refill/',
+      );
+      return response.data as List;
+    } catch (e) {
+      throw Exception('Failed to load medications needing refill: $e');
+    }
+  }
+
+  /// Create new medication
+  /// POST /api/v1/medications/medications/
+  Future<Map<String, dynamic>> createMedication(
+    Map<String, dynamic> data,
+  ) async {
+    try {
+      final response = await _api.post(
+        '/api/v1/medications/medications/',
+        data: data,
+      );
+      return response.data;
+    } catch (e) {
+      throw Exception('Failed to create medication: $e');
+    }
+  }
+
+  /// Update medication
+  /// PUT /api/v1/medications/medications/{id}/
+  Future<Map<String, dynamic>> updateMedication(
+    int id,
+    Map<String, dynamic> data,
+  ) async {
+    try {
+      final response = await _api.put(
+        '/api/v1/medications/medications/$id/',
+        data: data,
+      );
+      return response.data;
+    } catch (e) {
+      throw Exception('Failed to update medication: $e');
+    }
+  }
+
+  /// Discontinue medication
+  /// POST /api/v1/medications/medications/{id}/discontinue/
+  Future<Map<String, dynamic>> discontinueMedication(
+    int id,
+    String reason,
+  ) async {
+    try {
+      final response = await _api.post(
+        '/api/v1/medications/medications/$id/discontinue/',
+        data: {'reason': reason},
+      );
+      return response.data;
+    } catch (e) {
+      throw Exception('Failed to discontinue medication: $e');
+    }
+  }
+
+  /// Resume medication
+  /// POST /api/v1/medications/medications/{id}/resume/
+  Future<Map<String, dynamic>> resumeMedication(int id) async {
+    try {
+      final response = await _api.post(
+        '/api/v1/medications/medications/$id/resume/',
+      );
+      return response.data;
+    } catch (e) {
+      throw Exception('Failed to resume medication: $e');
+    }
+  }
+
+  /// Get adherence summary for medication
+  /// GET /api/v1/medications/medications/{id}/adherence_summary/
+  Future<Map<String, dynamic>> getMedicationAdherenceSummary(
+    int id, {
+    int days = 7,
+  }) async {
+    try {
+      final response = await _api.get(
+        '/api/v1/medications/medications/$id/adherence_summary/',
+        queryParameters: {'days': days},
+      );
+      return response.data;
+    } catch (e) {
+      throw Exception('Failed to load adherence summary: $e');
+    }
+  }
+
+  // ==================== ADHERENCE ====================
+
+  /// Get today's medication schedule
+  /// GET /api/v1/medications/adherence/today/
+  Future<List<dynamic>> getTodaysSchedule({int? patientId}) async {
+    try {
+      final queryParams = <String, dynamic>{
+        if (patientId != null) 'patient_id': patientId,
+      };
+
+      final response = await _api.get(
+        '/api/v1/medications/adherence/today/',
+        queryParameters: queryParams,
+      );
+      return response.data as List;
+    } catch (e) {
+      throw Exception('Failed to load today\'s schedule: $e');
+    }
+  }
+
+  /// Get upcoming medications
+  /// GET /api/v1/medications/adherence/upcoming/
+  Future<List<dynamic>> getUpcomingMedications({
+    int hours = 4,
+    int? patientId,
+  }) async {
+    try {
+      final queryParams = <String, dynamic>{
+        'hours': hours,
+        if (patientId != null) 'patient_id': patientId,
+      };
+
+      final response = await _api.get(
+        '/api/v1/medications/adherence/upcoming/',
+        queryParameters: queryParams,
+      );
+      return response.data as List;
+    } catch (e) {
+      throw Exception('Failed to load upcoming medications: $e');
+    }
+  }
+
+  /// Get adherence rate
+  /// GET /api/v1/medications/adherence/rate/
+  Future<Map<String, dynamic>> getAdherenceRate({
+    int days = 7,
+    int? patientId,
+  }) async {
+    try {
+      final queryParams = <String, dynamic>{
+        'days': days,
+        if (patientId != null) 'patient_id': patientId,
+      };
+
+      final response = await _api.get(
+        '/api/v1/medications/adherence/rate/',
+        queryParameters: queryParams,
+      );
+      return response.data;
+    } catch (e) {
+      throw Exception('Failed to load adherence rate: $e');
+    }
+  }
+
+  /// Mark medication as taken
   /// POST /api/v1/medications/adherence/{id}/mark_taken/
   Future<Map<String, dynamic>> markAdherenceTaken({
     required int adherenceId,
@@ -70,7 +233,7 @@ class MedicationService {
     try {
       final data = {
         'confirmation_method': confirmationMethod ?? 'app',
-        if (notes != null) 'notes': notes,
+        if (notes != null && notes.isNotEmpty) 'notes': notes,
       };
 
       final response = await _api.post(
@@ -83,14 +246,18 @@ class MedicationService {
     }
   }
 
-  /// Mark medication adherence as skipped
+  /// Mark medication as skipped
   /// POST /api/v1/medications/adherence/{id}/mark_skipped/
   Future<Map<String, dynamic>> markAdherenceSkipped({
     required int adherenceId,
     required String reason,
+    String? notes,
   }) async {
     try {
-      final data = {'skip_reason': reason};
+      final data = {
+        'skip_reason': reason,
+        if (notes != null && notes.isNotEmpty) 'notes': notes,
+      };
 
       final response = await _api.post(
         '/api/v1/medications/adherence/$adherenceId/mark_skipped/',
@@ -130,273 +297,7 @@ class MedicationService {
     }
   }
 
-  /// Get adherence rate
-  /// Note: This endpoint path doesn't exist in backend - using patterns instead
-  /// GET /api/v1/medications/patterns/ with calculation
-  Future<double> getAdherenceRate({int? patientId, int days = 7}) async {
-    try {
-      // Using adherence patterns to calculate rate
-      final patterns = await getAdherencePatterns(
-        patientId: patientId,
-        periodLabel: 'last_${days}days',
-      );
-
-      if (patterns['results'] != null &&
-          (patterns['results'] as List).isNotEmpty) {
-        final latest = patterns['results'][0];
-        return (latest['adherence_rate'] as num).toDouble();
-      }
-
-      return 0.0;
-    } catch (e) {
-      throw Exception('Failed to get adherence rate: $e');
-    }
-  }
-
-  // ==================== NEW MEDICATION CRUD ENDPOINTS ====================
-
-  /// Get a single medication
-  /// GET /api/v1/medications/medications/{id}/
-  Future<Map<String, dynamic>> getMedication(int id) async {
-    try {
-      final response = await _api.get('/api/v1/medications/medications/$id/');
-      return response.data;
-    } catch (e) {
-      throw Exception('Failed to load medication: $e');
-    }
-  }
-
-  /// Create a new medication
-  /// POST /api/v1/medications/medications/
-  Future<Map<String, dynamic>> createMedication(
-    Map<String, dynamic> data,
-  ) async {
-    try {
-      final response = await _api.post(
-        '/api/v1/medications/medications/',
-        data: data,
-      );
-      return response.data;
-    } catch (e) {
-      throw Exception('Failed to create medication: $e');
-    }
-  }
-
-  /// Update a medication
-  /// PUT /api/v1/medications/medications/{id}/
-  Future<Map<String, dynamic>> updateMedication(
-    int id,
-    Map<String, dynamic> data,
-  ) async {
-    try {
-      final response = await _api.put(
-        '/api/v1/medications/medications/$id/',
-        data: data,
-      );
-      return response.data;
-    } catch (e) {
-      throw Exception('Failed to update medication: $e');
-    }
-  }
-
-  /// Partially update a medication
-  /// PATCH /api/v1/medications/medications/{id}/
-  Future<Map<String, dynamic>> patchMedication(
-    int id,
-    Map<String, dynamic> data,
-  ) async {
-    try {
-      final response = await _api.patch(
-        '/api/v1/medications/medications/$id/',
-        data: data,
-      );
-      return response.data;
-    } catch (e) {
-      throw Exception('Failed to patch medication: $e');
-    }
-  }
-
-  /// Delete a medication
-  /// DELETE /api/v1/medications/medications/{id}/
-  Future<void> deleteMedication(int id) async {
-    try {
-      await _api.delete('/api/v1/medications/medications/$id/');
-    } catch (e) {
-      throw Exception('Failed to delete medication: $e');
-    }
-  }
-
-  // ==================== NEW MEDICATION ACTIONS ====================
-
-  /// Discontinue a medication
-  /// POST /api/v1/medications/medications/{id}/discontinue/
-  Future<Map<String, dynamic>> discontinueMedication(
-    int id, {
-    required String reason,
-  }) async {
-    try {
-      final data = {'reason': reason};
-
-      final response = await _api.post(
-        '/api/v1/medications/medications/$id/discontinue/',
-        data: data,
-      );
-      return response.data;
-    } catch (e) {
-      throw Exception('Failed to discontinue medication: $e');
-    }
-  }
-
-  /// Resume a discontinued medication
-  /// POST /api/v1/medications/medications/{id}/resume/
-  Future<Map<String, dynamic>> resumeMedication(int id) async {
-    try {
-      final response = await _api.post(
-        '/api/v1/medications/medications/$id/resume/',
-      );
-      return response.data;
-    } catch (e) {
-      throw Exception('Failed to resume medication: $e');
-    }
-  }
-
-  /// Get adherence summary for a medication
-  /// GET /api/v1/medications/medications/{id}/adherence_summary/
-  Future<Map<String, dynamic>> getMedicationAdherenceSummary(
-    int id, {
-    String period = '7days',
-  }) async {
-    try {
-      final response = await _api.get(
-        '/api/v1/medications/medications/$id/adherence_summary/',
-        queryParameters: {'period': period},
-      );
-      return response.data;
-    } catch (e) {
-      throw Exception('Failed to load adherence summary: $e');
-    }
-  }
-
-  /// Get all active medications
-  /// GET /api/v1/medications/medications/active/
-  Future<List<dynamic>> getActiveMedications({int? patientId}) async {
-    try {
-      final queryParams = <String, dynamic>{
-        if (patientId != null) 'patient_id': patientId,
-      };
-
-      final response = await _api.get(
-        '/api/v1/medications/medications/active/',
-        queryParameters: queryParams,
-      );
-      return response.data as List;
-    } catch (e) {
-      throw Exception('Failed to load active medications: $e');
-    }
-  }
-
-  /// Get medications that need refill
-  /// GET /api/v1/medications/medications/needs_refill/
-  Future<List<dynamic>> getMedicationsNeedingRefill({int? patientId}) async {
-    try {
-      final queryParams = <String, dynamic>{
-        if (patientId != null) 'patient_id': patientId,
-      };
-
-      final response = await _api.get(
-        '/api/v1/medications/medications/needs_refill/',
-        queryParameters: queryParams,
-      );
-      return response.data as List;
-    } catch (e) {
-      throw Exception('Failed to load medications needing refill: $e');
-    }
-  }
-
-  // ==================== NEW ADHERENCE ACTIONS ====================
-
-  /// Get upcoming medication doses
-  /// GET /api/v1/medications/adherence/upcoming/
-  Future<List<dynamic>> getUpcomingDoses({int? patientId}) async {
-    try {
-      final queryParams = <String, dynamic>{
-        if (patientId != null) 'patient_id': patientId,
-      };
-
-      final response = await _api.get(
-        '/api/v1/medications/adherence/upcoming/',
-        queryParameters: queryParams,
-      );
-      return response.data as List;
-    } catch (e) {
-      throw Exception('Failed to load upcoming doses: $e');
-    }
-  }
-
-  /// Get overdue medication doses
-  /// GET /api/v1/medications/adherence/overdue/
-  Future<List<dynamic>> getOverdueDoses({int? patientId}) async {
-    try {
-      final queryParams = <String, dynamic>{
-        if (patientId != null) 'patient_id': patientId,
-      };
-
-      final response = await _api.get(
-        '/api/v1/medications/adherence/overdue/',
-        queryParameters: queryParams,
-      );
-      return response.data as List;
-    } catch (e) {
-      throw Exception('Failed to load overdue doses: $e');
-    }
-  }
-
-  /// Get a single adherence record
-  /// GET /api/v1/medications/adherence/{id}/
-  Future<Map<String, dynamic>> getAdherenceRecord(int id) async {
-    try {
-      final response = await _api.get('/api/v1/medications/adherence/$id/');
-      return response.data;
-    } catch (e) {
-      throw Exception('Failed to load adherence record: $e');
-    }
-  }
-
-  /// Update an adherence record
-  /// PUT /api/v1/medications/adherence/{id}/
-  Future<Map<String, dynamic>> updateAdherenceRecord(
-    int id,
-    Map<String, dynamic> data,
-  ) async {
-    try {
-      final response = await _api.put(
-        '/api/v1/medications/adherence/$id/',
-        data: data,
-      );
-      return response.data;
-    } catch (e) {
-      throw Exception('Failed to update adherence record: $e');
-    }
-  }
-
-  /// Partially update an adherence record
-  /// PATCH /api/v1/medications/adherence/{id}/
-  Future<Map<String, dynamic>> patchAdherenceRecord(
-    int id,
-    Map<String, dynamic> data,
-  ) async {
-    try {
-      final response = await _api.patch(
-        '/api/v1/medications/adherence/$id/',
-        data: data,
-      );
-      return response.data;
-    } catch (e) {
-      throw Exception('Failed to patch adherence record: $e');
-    }
-  }
-
-  // ==================== NEW SCHEDULES ENDPOINTS ====================
+  // ==================== SCHEDULES ====================
 
   /// Get medication schedules
   /// GET /api/v1/medications/schedules/
@@ -422,18 +323,7 @@ class MedicationService {
     }
   }
 
-  /// Get a single medication schedule
-  /// GET /api/v1/medications/schedules/{id}/
-  Future<Map<String, dynamic>> getMedicationSchedule(int id) async {
-    try {
-      final response = await _api.get('/api/v1/medications/schedules/$id/');
-      return response.data;
-    } catch (e) {
-      throw Exception('Failed to load medication schedule: $e');
-    }
-  }
-
-  /// Create a medication schedule
+  /// Create medication schedule
   /// POST /api/v1/medications/schedules/
   Future<Map<String, dynamic>> createMedicationSchedule(
     Map<String, dynamic> data,
@@ -449,7 +339,7 @@ class MedicationService {
     }
   }
 
-  /// Update a medication schedule
+  /// Update medication schedule
   /// PUT /api/v1/medications/schedules/{id}/
   Future<Map<String, dynamic>> updateMedicationSchedule(
     int id,
@@ -466,24 +356,7 @@ class MedicationService {
     }
   }
 
-  /// Partially update a medication schedule
-  /// PATCH /api/v1/medications/schedules/{id}/
-  Future<Map<String, dynamic>> patchMedicationSchedule(
-    int id,
-    Map<String, dynamic> data,
-  ) async {
-    try {
-      final response = await _api.patch(
-        '/api/v1/medications/schedules/$id/',
-        data: data,
-      );
-      return response.data;
-    } catch (e) {
-      throw Exception('Failed to patch medication schedule: $e');
-    }
-  }
-
-  /// Delete a medication schedule
+  /// Delete medication schedule
   /// DELETE /api/v1/medications/schedules/{id}/
   Future<void> deleteMedicationSchedule(int id) async {
     try {
