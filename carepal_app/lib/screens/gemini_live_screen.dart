@@ -177,7 +177,7 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
         final payload = jsonEncode({
           "type": "audio",
           "data": b64,
-          "mime_type": "audio/pcm; rate=$_sampleRate" 
+          "mime_type": "audio/pcm;rate=$_sampleRate" 
         });
         _channel!.sink.add(payload);
     } catch (e) {

@@ -41,7 +41,7 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         {
             "type": "audio" | "image" | "text",
             "data": "base64_encoded_string", 
-            "mime_type": "audio/pcm; rate=16000" (optional/required depending on type)
+        "mime_type": "audio/pcm;rate=16000" (optional/required depending on type)
         }
         """
         try:
