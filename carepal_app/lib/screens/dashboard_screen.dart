@@ -1,5 +1,6 @@
 // lib/screens/dashboard_screen.dart
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
@@ -21,6 +22,7 @@ import 'analytics/analytics_screen.dart';
 import 'profile/profile_screen.dart';
 import 'family/family_members_screen.dart';
 import 'admin_test_page.dart';
+import 'gemini_live_screen.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -238,6 +240,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             _buildHeader(),
+            const SizedBox(height: 24),
+            _buildGeminiLiveCard(),
             const SizedBox(height: 24),
             _buildGreeting(firstName),
             const SizedBox(height: 32),
@@ -581,6 +585,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Future<void> _requestPermissions() async {
+    // Skip Bluetooth permissions on Web
+    if (kIsWeb) return;
+
     // Android 12+ requires bluetoothScan and bluetoothConnect
     // Android 11- requires location
     Map<Permission, PermissionStatus> statuses = await [
@@ -613,6 +620,68 @@ class _DashboardScreenState extends State<DashboardScreen> {
           style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
         ),
       ],
+    );
+  }
+
+  Widget _buildGeminiLiveCard() {
+    return GestureDetector(
+      onTap: () {
+        Navigator.push(
+          context,
+          MaterialPageRoute(builder: (context) => const GeminiLiveScreen()),
+        );
+      },
+      child: Container(
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            colors: [Color(0xFF4285F4), Color(0xFF9C27B0)], // Google Blue to Purple
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+          borderRadius: BorderRadius.circular(24),
+          boxShadow: [
+             BoxShadow(color: const Color(0xFF4285F4).withOpacity(0.3), blurRadius: 10, offset: const Offset(0, 4))
+          ]
+        ),
+        child: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.2),
+                shape: BoxShape.circle
+              ),
+              child: const Icon(Icons.videocam, color: Colors.white, size: 28),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: const [
+                  Text(
+                    "Talk to Gemini Live",
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold
+                    ),
+                  ),
+                  SizedBox(height: 4),
+                  Text(
+                    "Real-time video & audio chat",
+                     style: TextStyle(
+                      color: Colors.white70,
+                      fontSize: 14,
+                    ),
+                  )
+                ],
+              ),
+            ),
+            const Icon(Icons.arrow_forward_ios, color: Colors.white70, size: 16)
+          ],
+        ),
+      ),
     );
   }
 }
