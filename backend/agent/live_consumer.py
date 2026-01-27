@@ -103,52 +103,73 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                 sender_task = asyncio.create_task(self.sender_loop())
 
                 # Receiver loop
-                async for response in session.receive():
-                    if self.stop_event.is_set():
-                        break
+                logger.info("Starting receiver loop")
+                try:
+                    while not self.stop_event.is_set():
+                        async for response in session.receive():
+                            if self.stop_event.is_set():
+                                break
+                            
+                            server_content = getattr(response, "server_content", None)
+                            if server_content:
+                                logger.info(f"Server content: turn_complete={server_content.turn_complete}, interrupted={server_content.interrupted}")
 
-                    # Handle Audio
-                    if response.data:
-                        # raw PCM data
-                        b64_audio = base64.b64encode(response.data).decode('utf-8')
-                        await self.send(text_data=json.dumps({
-                            "type": "audio",
-                            "data": b64_audio
-                        }))
+                            if response.data:
+                                b64_audio = base64.b64encode(response.data).decode('utf-8')
+                                await self.send(text_data=json.dumps({
+                                    "type": "audio",
+                                    "data": b64_audio
+                                }))
 
-                    # Handle Text (Transcript or response)
-                    if response.text:
-                        await self.send(text_data=json.dumps({
-                            "type": "text",
-                            "content": response.text
-                        }))
+                            if response.text:
+                                logger.info(f"Received text: {response.text[:50]}...")
+                                await self.send(text_data=json.dumps({
+                                    "type": "text",
+                                    "content": response.text
+                                }))
+                        
+                        logger.info("Receiver loop finished (turn complete). Re-entering...")
+                        if self.stop_event.is_set():
+                            break
+                        
+                        # Small delay to prevent busy looping if connection is dead but not raising error
+                        await asyncio.sleep(0.05)
+
+                except Exception as inner_e:
+                    logger.error(f"Error inside receiver loop: {inner_e}", exc_info=True)
                     
-                    # Handle turn complete or other signals if needed
-
                 sender_task.cancel()
 
         except asyncio.CancelledError:
+            logger.info("Gemini session cancelled")
             pass
         except Exception as e:
-            logger.error(f"Gemini session error: {e}")
+            logger.error(f"Gemini session error: {e}", exc_info=True)
             try:
                 await self.send(text_data=json.dumps({"error": f"Gemini Error: {str(e)}"}))
             except:
                 pass
+        finally:
+            logger.info("Exiting run_gemini_session")
 
     async def sender_loop(self):
+        logger.info("Starting sender loop")
         try:
             while True:
                 item = await self.input_queue.get()
                 
                 if "text" in item:
                     # It's a text message
+                    logger.info(f"Sending text to Gemini: {item['text']}")
                     await self.session.send(input=item["text"], end_of_turn=True)
                 else:
                     # It's media (audio/image) dict {"mime_type":..., "data":...}
+                    # logger.info("Sending media chunk to Gemini") # noisy
                     await self.session.send(input=item)
                     
         except asyncio.CancelledError:
+            logger.info("Sender loop cancelled")
             pass
         except Exception as e:
-            logger.error(f"Error in sender loop: {e}")
+            logger.error(f"Error in sender loop: {e}", exc_info=True)
+

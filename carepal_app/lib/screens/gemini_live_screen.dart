@@ -9,6 +9,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:record/record.dart'; // record package
 import 'package:flutter_pcm_sound/flutter_pcm_sound.dart';
+import 'package:audio_session/audio_session.dart';
 import 'package:image/image.dart' as img;
 import '../services/api_service.dart';
 
@@ -87,6 +88,23 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
 
   Future<void> _initAudio() async {
     try {
+      // Init Audio Session
+      final session = await AudioSession.instance;
+      await session.configure(AudioSessionConfiguration(
+        avAudioSessionCategory: AVAudioSessionCategory.playAndRecord,
+        avAudioSessionCategoryOptions: AVAudioSessionCategoryOptions.allowBluetooth | AVAudioSessionCategoryOptions.defaultToSpeaker,
+        avAudioSessionMode: AVAudioSessionMode.voiceChat,
+        avAudioSessionRouteSharingPolicy: AVAudioSessionRouteSharingPolicy.defaultPolicy,
+        avAudioSessionSetActiveOptions: AVAudioSessionSetActiveOptions.none,
+        androidAudioAttributes: const AndroidAudioAttributes(
+          contentType: AndroidAudioContentType.speech,
+          flags: AndroidAudioFlags.none,
+          usage: AndroidAudioUsage.voiceCommunication,
+        ),
+        androidAudioFocusGainType: AndroidAudioFocusGainType.gain,
+        androidWillPauseWhenDucked: true,
+      ));
+
       // Init Mic using record package
       if (await _audioRecorder.hasPermission()) {
          final stream = await _audioRecorder.startStream(
@@ -99,6 +117,10 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
 
          _audioSubscription = stream.listen((data) {
              _sendAudio(data);
+         }, onError: (e) {
+             print("Audio Stream Error: $e");
+         }, onDone: () {
+             print("Audio Stream Done (Closed by OS/User)");
          });
       }
 
@@ -148,6 +170,7 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
       try {
         final data = jsonDecode(message);
         final type = data['type'];
+        print("Received WS Message: $type");
         
         if (type == 'audio') {
            final audioBase64 = data['data'];
@@ -173,6 +196,17 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
     if (_channel == null) return;
     
     try {
+        // Calculate energy to check for silence
+        if (data.length > 0) {
+           final int16s = data.buffer.asInt16List();
+           double energy = 0;
+           for (var s in int16s) {
+              energy += s.abs();
+           }
+           energy /= int16s.length;
+           print("Sent Audio Chunk: ${data.length} bytes, Energy: ${energy.toStringAsFixed(2)}");
+        }
+
         final b64 = base64Encode(data);
         final payload = jsonEncode({
           "type": "audio",
@@ -181,7 +215,7 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
         });
         _channel!.sink.add(payload);
     } catch (e) {
-        // ignore
+        print("Send Audio Error: $e");
     }
   }
 

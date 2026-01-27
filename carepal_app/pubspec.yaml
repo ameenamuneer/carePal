@@ -53,6 +53,7 @@ dependencies:
   record: ^5.2.0
   flutter_pcm_sound: ^3.3.3
   image: ^4.1.7
+  audio_session: ^0.1.21
 
 dev_dependencies:
   flutter_test:
