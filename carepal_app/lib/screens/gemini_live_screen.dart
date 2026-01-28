@@ -32,7 +32,7 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
   static const int _sampleRate = 16000;
   
   DateTime _lastFrameTime = DateTime.now();
-  final Duration _frameInterval = const Duration(milliseconds: 500); // 2 FPS
+  final Duration _frameInterval = const Duration(seconds: 1); // 1 FPS
   bool _isProcessingFrame = false;
 
   StreamSubscription<Uint8List>? _audioSubscription;
@@ -170,7 +170,7 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
       try {
         final data = jsonDecode(message);
         final type = data['type'];
-        print("Received WS Message: $type");
+        // print("Received WS Message: $type"); // Reduced logging
         
         if (type == 'audio') {
            final audioBase64 = data['data'];
@@ -196,16 +196,8 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
     if (_channel == null) return;
     
     try {
-        // Calculate energy to check for silence
-        if (data.length > 0) {
-           final int16s = data.buffer.asInt16List();
-           double energy = 0;
-           for (var s in int16s) {
-              energy += s.abs();
-           }
-           energy /= int16s.length;
-           print("Sent Audio Chunk: ${data.length} bytes, Energy: ${energy.toStringAsFixed(2)}");
-        }
+        // Removed energy calculation and logging to reduce overhead
+        if (data.isEmpty) return;
 
         final b64 = base64Encode(data);
         final payload = jsonEncode({
@@ -315,7 +307,6 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
                        _isConnected ? "Gemini Live Connected" : "Connecting...",
                        style: const TextStyle(
                          color: Colors.white, 
-                         fontWeight: FontWeight.w600
                        ),
                      ),
                    ],
@@ -349,18 +340,13 @@ Uint8List? convertYUV420toJPEG(YuvConvertRequest req) {
     final int width = req.width;
     final int height = req.height;
     
-    // Create Image (simplified)
-    // For YUV420:
-    // Y plane is full res
-    // U, V planes are half res
-    
-    // Using image package v4
-    final image = img.Image(width: width, height: height);
-    
-    // This is a VERY simplified loop. 
-    // Optimization: Skip every 2nd pixel to reduce image size for AI? 
-    // AI expects "Medium" resolution. 
-    // 640x480 is commonly enough.
+    // Downsample factor (skip pixels to reduce size)
+    const int step = 2; // Process 1 out of every 2 pixels (effectively 1/4 resolution)
+    final int newWidth = width ~/ step;
+    final int newHeight = height ~/ step;
+
+    // Create Image at reduced resolution
+    final image = img.Image(width: newWidth, height: newHeight);
     
     // Assuming YUV420 structure
     final yPlane = req.planes[0];
@@ -372,13 +358,16 @@ Uint8List? convertYUV420toJPEG(YuvConvertRequest req) {
     final vStride = req.strides[2];
     
     final uvPixelStride = req.planes[1].length > (width * height / 4) ? 2 : 1; 
-    // If pixelStride is 2, it's semi-planar or similar?
-    // Let's iterate.
     
-    for (int y = 0; y < height; y++) {
-      for (int x = 0; x < width; x++) {
-        final int yIndex = y * yStride + x;
-        final int index = (y ~/ 2) * uStride + (x ~/ 2) * uvPixelStride;
+    
+    for (int y = 0; y < newHeight; y++) {
+      for (int x = 0; x < newWidth; x++) {
+        // Map back to original coordinates
+        final int origX = x * step;
+        final int origY = y * step;
+
+        final int yIndex = origY * yStride + origX;
+        final int index = (origY ~/ 2) * uStride + (origX ~/ 2) * uvPixelStride;
         
         // Safety check
         if (yIndex >= yPlane.length || index >= uPlane.length || index >= vPlane.length) continue;
@@ -397,9 +386,10 @@ Uint8List? convertYUV420toJPEG(YuvConvertRequest req) {
     }
     
     // Compress to JPEG
-    return img.encodeJpg(image, quality: 70);
+    return img.encodeJpg(image, quality: 60); // Reduced quality slightly for speed
   } catch (e) {
     // print("Convert Error: $e");
     return null;
   }
 }
+
