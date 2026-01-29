@@ -315,7 +315,7 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                       ),
                     ),
                     contentPadding: EdgeInsets.zero,
-                    activeColor: AppColors.error,
+                    activeThumbColor: AppColors.error,
                   ),
                   const SizedBox(height: 32),
 
@@ -409,7 +409,7 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
     required void Function(String?) onChanged,
   }) {
     return DropdownButtonFormField<String>(
-      value: value,
+      initialValue: value,
       items: items
           .map((e) => DropdownMenuItem(value: e, child: Text(e)))
           .toList(),

@@ -274,6 +274,7 @@ class VitalReading(models.Model):
             models.Index(fields=['is_anomaly', 'anomaly_severity']),
             models.Index(fields=['session_id']),
         ]
+        unique_together = ['patient', 'vital_type', 'measured_at']
     
     def __str__(self):
         return f"{self.vital_type.name}: {self.get_display_value()} - {self.patient.user.get_full_name()}"

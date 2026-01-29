@@ -159,6 +159,20 @@ class MedicationService {
     }
   }
 
+  /// Import prescription from Eka.Care
+  /// POST /api/v1/medications/medications/import_prescription/
+  Future<List<dynamic>> importPrescription(String prescriptionId) async {
+    try {
+      final response = await _api.post(
+        '/api/v1/medications/medications/import_prescription/',
+        data: {'prescription_id': prescriptionId},
+      );
+      return response.data['medications'] as List;
+    } catch (e) {
+      throw Exception('Failed to import prescription: $e');
+    }
+  }
+
   // ==================== ADHERENCE ====================
 
   /// Get today's medication schedule

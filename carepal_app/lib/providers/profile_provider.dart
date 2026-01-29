@@ -175,20 +175,69 @@ class ProfileProvider with ChangeNotifier {
     }
   }
 
-  // Delete emergency contact
-  Future<bool> deleteEmergencyContact(int contactId) async {
-    try {
-      await _patientService.deleteEmergencyContact(contactId);
+  // ==================== EKA.CARE Actions ====================
 
-      // Reload emergency contacts
-      if (patientId != null) {
-        await loadEmergencyContacts(patientId!);
-      }
+  Future<bool> createEkaPatient() async {
+    _isLoading = true;
+    notifyListeners();
+    try {
+      await _patientService.createEkaPatient();
+      await loadProfile(); // Reload to get updated IDs
       return true;
     } catch (e) {
-      _error = 'Failed to delete emergency contact: $e';
+      _error = e.toString();
       notifyListeners();
       return false;
+    } finally {
+      _isLoading = false;
+      notifyListeners();
+    }
+  }
+
+  Future<Map<String, dynamic>?> registerAbhaStep1(String aadhaar) async {
+    _isLoading = true;
+    notifyListeners();
+    try {
+      return await _patientService.registerAbhaStep1(aadhaar);
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return null;
+    } finally {
+      _isLoading = false;
+      notifyListeners();
+    }
+  }
+
+  Future<Map<String, dynamic>?> registerAbhaStep2(String otp) async {
+    _isLoading = true;
+    notifyListeners();
+    try {
+      return await _patientService.registerAbhaStep2(otp);
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return null;
+    } finally {
+      _isLoading = false;
+      notifyListeners();
+    }
+  }
+
+  Future<bool> registerAbhaStep3(String abhaAddress) async {
+    _isLoading = true;
+    notifyListeners();
+    try {
+      await _patientService.registerAbhaStep3(abhaAddress);
+      await loadProfile(); // Reload to get ABHA info
+      return true;
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return false;
+    } finally {
+      _isLoading = false;
+      notifyListeners();
     }
   }
 

@@ -10,6 +10,9 @@ class Medication {
   final DateTime startDate;
   final DateTime? endDate;
   final String status;
+  final String source;
+  final String? ekaPrescriptionId;
+  final String? ekaDrugId;
   final List<String> scheduleDetails;
 
   Medication({
@@ -24,6 +27,9 @@ class Medication {
     required this.startDate,
     this.endDate,
     required this.status,
+    this.source = 'MANUAL',
+    this.ekaPrescriptionId,
+    this.ekaDrugId,
     this.scheduleDetails = const [],
   });
 
@@ -44,6 +50,9 @@ class Medication {
           ? DateTime.parse(json['end_date'])
           : null,
       status: json['status'] ?? 'UNKNOWN',
+      source: json['source'] ?? 'MANUAL',
+      ekaPrescriptionId: json['eka_prescription_id'],
+      ekaDrugId: json['eka_drug_id'],
       scheduleDetails: json['schedule_details'] != null
           ? List<String>.from(json['schedule_details'])
           : [],

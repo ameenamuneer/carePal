@@ -12,6 +12,11 @@ from .serializers import (
     EmergencyContactSerializer,
     HealthConditionSerializer
 )
+from ekacare.authentication import EkaCareAuth, EkaCareAPIException
+from ekacare.patient_integration import EkaCarePatientIntegration
+import logging
+
+logger = logging.getLogger(__name__)
 
 class PatientProfileViewSet(viewsets.ModelViewSet):
     """
@@ -143,6 +148,382 @@ class PatientProfileViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
     
+    # ==================== EKA.CARE PATIENT CREATION ====================
+    
+    @action(detail=False, methods=['post'])
+    def create_eka_patient(self, request):
+        """
+        Create patient in Eka.Care Patient Directory
+        Links Eka patient_id to CarePAL patient
+        """
+        try:
+            patient = request.user.patient_profile
+            
+            # Check if already created
+            if patient.has_eka_patient:
+                return Response({
+                    'success': True,
+                    'message': 'Patient already exists in Eka.Care',
+                    'eka_patient_id': patient.eka_patient_id,
+                    'partner_patient_id': patient.partner_patient_id,
+                    'patient': PatientProfileSerializer(patient).data
+                })
+            
+            # Create in Eka.Care and link
+            eka_patient_id = EkaCarePatientIntegration.ensure_patient_in_ekacare(
+                patient
+            )
+            
+            # Return updated patient from CarePAL DB
+            patient.refresh_from_db()
+            serializer = self.get_serializer(patient)
+            
+            return Response({
+                'success': True,
+                'message': 'Patient created in Eka.Care and linked',
+                'eka_patient_id': eka_patient_id,
+                'partner_patient_id': patient.partner_patient_id,
+                'patient': serializer.data
+            }, status=status.HTTP_201_CREATED)
+            
+        except EkaCareAPIException as e:
+            logger.error(f"Eka patient creation failed: {str(e)}")
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    # ==================== ABHA REGISTRATION ====================
+    
+    @action(detail=False, methods=['post'])
+    def register_abha_step1(self, request):
+        """Step 1: Generate OTP for Aadhaar"""
+        try:
+            aadhaar_number = request.data.get('aadhaar_number')
+            
+            if not aadhaar_number or len(aadhaar_number) != 12:
+                return Response(
+                    {'error': 'Valid 12-digit Aadhaar required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Updated Endpoint: init
+            result = EkaCareAuth.make_request(
+                'POST',
+                '/abdm/na/v1/registration/aadhaar/init',
+                data={'aadhaar_number': aadhaar_number}
+            )
+            
+            logger.info(f"ABHA Init Result: {result}")
+            
+            # Updated Key: txn_id (snake_case)
+            txn_id = result.get('txn_id')
+            request.session['abha_txn_id'] = txn_id
+            
+            return Response({
+                'success': True,
+                'message': 'OTP sent to Aadhaar-linked mobile',
+                'txn_id': txn_id
+            })
+            
+        except EkaCareAPIException as e:
+            logger.error(f"ABHA Step 1 Failed: {str(e)}")
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    @action(detail=False, methods=['post'])
+    def register_abha_step2(self, request):
+        """Step 2: Verify OTP"""
+        try:
+            otp = request.data.get('otp')
+            # ALLOW txn_id from body OR session
+            txn_id = request.data.get('txn_id') or request.session.get('abha_txn_id')
+            
+            # Mobile is required by Eka.Care /verify endpoint
+            # Default to patient's registered phone if not provided
+            mobile = request.data.get('mobile')
+            if not mobile:
+                # Phone is on User model, not PatientProfile
+                mobile = request.user.phone_number
+                # Strip +91 if present for 10-digit requirement
+                if mobile and mobile.startswith('+91'):
+                    mobile = mobile[3:]
+            
+            if not otp or not txn_id or not mobile:
+                missing = []
+                if not otp: missing.append("OTP")
+                if not txn_id: missing.append("txn_id")
+                if not mobile: missing.append("mobile number (in profile or request)")
+                
+                return Response(
+                    {'error': f"Missing required fields: {', '.join(missing)}"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Updated Endpoint: verify (based on docs)
+            result = EkaCareAuth.make_request(
+                'POST',
+                '/abdm/na/v1/registration/aadhaar/verify',
+                data={
+                    'txn_id': txn_id, 
+                    'otp': otp,
+                    'mobile': mobile
+                }
+            )
+            
+            logger.info(f"ABHA Verify Result: {result}")
+            
+            new_txn_id = result.get('txn_id')
+            request.session['abha_txn_id'] = new_txn_id
+            
+            return Response({
+                'success': True,
+                'message': 'OTP verified',
+                'txn_id': new_txn_id,
+                'mobile_used': mobile
+            })
+            
+        except EkaCareAPIException as e:
+            logger.error(f"ABHA Step 2 Failed: {str(e)}")
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    @action(detail=False, methods=['post'])
+    def register_abha_step3(self, request):
+        """
+        Step 3: Create ABHA and link to patient
+        Also updates Eka.Care patient if exists
+        """
+        try:
+            abha_address = request.data.get('abha_address')
+            # ALLOW txn_id from body OR session
+            txn_id = request.data.get('txn_id') or request.session.get('abha_txn_id')
+            
+            if not abha_address or not txn_id:
+                return Response(
+                    {'error': 'ABHA address and txn_id required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            if not abha_address.endswith('@abdm'):
+                abha_address = f"{abha_address}@abdm"
+            
+            # Updated Endpoint: create-phr
+            result = EkaCareAuth.make_request(
+                'POST',
+                '/abdm/na/v1/registration/aadhaar/create-phr',
+                data={'txn_id': txn_id, 'abha_address': abha_address}
+            )
+            
+            logger.info(f"ABHA Create Result: {result}")
+            
+            # Response parsing: profile['abha_number']
+            profile = result.get('profile', {})
+            abha_number = profile.get('abha_number')
+            
+            if not abha_number:
+                # Fallback if structure is different
+                abha_number = result.get('abha_number')
+
+            patient = request.user.patient_profile
+            
+            # Update patient with ABHA (also updates Eka.Care if linked)
+            EkaCarePatientIntegration.update_patient_abha(
+                patient,
+                abha_number,
+                abha_address
+            )
+            
+            # Clear session
+            request.session.pop('abha_txn_id', None)
+            
+            # Return from CarePAL DB
+            patient.refresh_from_db()
+            serializer = self.get_serializer(patient)
+            
+            return Response({
+                'success': True,
+                'message': 'ABHA created and linked',
+                'abha_number': abha_number,
+                'abha_address': abha_address,
+                'patient': serializer.data
+            }, status=status.HTTP_201_CREATED)
+            
+        except EkaCareAPIException as e:
+            logger.error(f"ABHA Step 3 Failed: {str(e)}")
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    @action(detail=False, methods=['post'])
+    def register_abha_resend_otp(self, request):
+        """Resend OTP for Aadhaar registration"""
+        try:
+            # ALLOW txn_id from body OR session
+            txn_id = request.data.get('txn_id') or request.session.get('abha_txn_id')
+            
+            if not txn_id:
+                return Response(
+                    {'error': 'txn_id required to resend OTP'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Resend OTP Endpoint
+            result = EkaCareAuth.make_request(
+                'POST',
+                '/abdm/na/v1/registration/aadhaar/resend',
+                data={'txn_id': txn_id}
+            )
+            
+            logger.info(f"ABHA Resend OTP Result: {result}")
+            
+            new_txn_id = result.get('txn_id')
+            request.session['abha_txn_id'] = new_txn_id
+            
+            return Response({
+                'success': True,
+                'message': 'OTP resent successfully',
+                'txn_id': new_txn_id,
+                'hint': result.get('hint')
+            })
+            
+        except EkaCareAPIException as e:
+            logger.error(f"ABHA Resend OTP Failed: {str(e)}")
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    @action(detail=False, methods=['post'])
+    def scan_and_share(self, request):
+        """
+        Scan & Share: Share profile with hospital via QR code
+        Expects: hip_id, counter_id, latitude (opt), longitude (opt)
+        """
+        try:
+            hip_id = request.data.get('hip_id')
+            counter_id = request.data.get('counter_id')
+            lat = request.data.get('latitude')
+            lon = request.data.get('longitude')
+            
+            if not hip_id or not counter_id:
+                return Response(
+                    {'error': 'hip_id and counter_id are required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            user = request.user
+            profile = user.patient_profile
+            
+            if not profile.abha_number and not profile.eka_patient_id:
+                 return Response(
+                    {'error': 'Patient must have ABHA or Eka Profile to share'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Construct Patient Payload
+            dob = user.date_of_birth
+            if not dob:
+                return Response(
+                    {'error': 'Date of Birth is required in profile to share'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Mobile formatting
+            mobile = user.phone_number
+            if mobile and mobile.startswith('+91'):
+                mobile = mobile[3:]
+                
+            abha_address = profile.abha_address or f"{mobile}@abdm" # Fallback guess
+
+            patient_payload = {
+                "name": user.get_full_name(),
+                "gender": profile.gender, # 'M', 'F', 'O'
+                "day_of_birth": str(dob.day),
+                "month_of_birth": str(dob.month),
+                "year_of_birth": str(dob.year),
+                "mobile": mobile,
+                "abha_address": abha_address,
+                "address": {
+                    "line": profile.address_line1 or " Indiranagar",
+                    "district": profile.city or "Bangalore",
+                    "state": profile.state or "Karnataka",
+                    "pin_code": profile.pincode or "560038"
+                }
+            }
+
+            location_payload = {
+                "latitude": str(lat) if lat else "12.9716",
+                "longitude": str(lon) if lon else "77.5946"
+            }
+
+            payload = {
+                "hip_id": hip_id,
+                "counter_id": counter_id,
+                "patient": patient_payload,
+                "location": location_payload
+            }
+            
+            # Call Eka.Care API
+            result = EkaCareAuth.make_request(
+                'POST',
+                '/abdm/v2/profile/share',
+                data=payload
+            )
+            
+            return Response({
+                'success': True,
+                'message': 'Profile shared successfully',
+                'request_id': result.get('request_id'),
+                'status': result.get('status'),
+                'token_number': result.get('token_number') # If available immed.
+            })
+            
+        except EkaCareAPIException as e:
+            logger.error(f"Scan & Share Failed: {str(e)}")
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+    @action(detail=False, methods=['get'])
+    def list_health_requests(self, request):
+        """
+        List Consents and Subscriptions
+        Query Params: status (requested, granted...), type (consent, subscription, all)
+        """
+        try:
+            status_filter = request.query_params.get('status', 'requested')
+            req_type = request.query_params.get('type', 'all')
+            
+            # Validate params to match Eka allowed values? 
+            # Letting API handle validation for flexibility
+            
+            params = {
+                'status': status_filter,
+                'type': req_type
+            }
+            
+            result = EkaCareAuth.make_request(
+                'GET',
+                '/abdm/v1/requests',
+                params=params
+            )
+            
+            return Response(result)
+            
+        except EkaCareAPIException as e:
+            logger.error(f"List Requests Failed: {str(e)}")
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
     @action(detail=True, methods=['post'])
     def add_health_condition(self, request, pk=None):
         """

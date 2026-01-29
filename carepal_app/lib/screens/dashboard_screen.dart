@@ -23,6 +23,8 @@ import 'profile/profile_screen.dart';
 import 'family/family_members_screen.dart';
 import 'admin_test_page.dart';
 import 'gemini_live_screen.dart';
+import 'appointments/appointment_list_screen.dart';
+import 'vitals/vitals_detail_screen.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -64,10 +66,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (mounted) {
         setState(() => _isInitializing = false);
       }
-      
+
       // Request Bluetooth permissions
       await _requestPermissions();
-
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -129,8 +130,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
       case 2:
         return const AnalyticsScreen();
       case 3:
-        return const FamilyMembersScreen();
+        return const AppointmentListScreen();
       case 4:
+        return const FamilyMembersScreen();
+      case 5:
         return const ProfileScreen();
       default:
         return _buildHomeOverview();
@@ -150,7 +153,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
         padding: const EdgeInsets.symmetric(vertical: 24),
         child: GestureDetector(
           onLongPress: () {
-            print("DashboardScreen: Long Press Detected! Navigating to AdminTestPage...");
+            print(
+              "DashboardScreen: Long Press Detected! Navigating to AdminTestPage...",
+            );
             Navigator.push(
               context,
               MaterialPageRoute(builder: (context) => const AdminTestPage()),
@@ -174,6 +179,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
           icon: Icon(Icons.analytics_outlined),
           selectedIcon: Icon(Icons.analytics),
           label: Text('Trends'),
+        ),
+
+        NavigationRailDestination(
+          icon: Icon(Icons.calendar_today_outlined),
+          selectedIcon: Icon(Icons.calendar_today),
+          label: Text('Visits'),
         ),
         NavigationRailDestination(
           icon: Icon(Icons.family_restroom_outlined),
@@ -212,6 +223,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
           icon: Icon(Icons.analytics_outlined),
           selectedIcon: Icon(Icons.analytics),
           label: 'Trends',
+        ),
+        NavigationDestination(
+          icon: Icon(Icons.calendar_today_outlined),
+          selectedIcon: Icon(Icons.calendar_today),
+          label: 'Visits',
         ),
         NavigationDestination(
           icon: Icon(Icons.family_restroom_outlined),
@@ -444,7 +460,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     if (vitalData != null) {
       final reading = vitalData['reading'];
-      value = reading.displayValue.split(' ')[0]; // Uses corrected model getter
+      value = reading.displayValue.split(' ')[0];
 
       status = reading.anomalySeverity == 'NORMAL' ? 'Normal' : 'Alert';
       statusColor = reading.anomalySeverity == 'NORMAL'
@@ -452,63 +468,78 @@ class _DashboardScreenState extends State<DashboardScreen> {
           : AppColors.error;
     }
 
-    return Container(
-      height: 180,
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: color.withOpacity(0.1), width: 1),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: color.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Icon(icon, color: color, size: 24),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 6,
-                ),
-                decoration: BoxDecoration(
-                  color: statusColor.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Text(
-                  status.toUpperCase(),
-                  style: TextStyle(
-                    fontSize: 10,
-                    fontWeight: FontWeight.w600,
-                    color: statusColor,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const Spacer(),
-          Text(
-            value,
-            style: GoogleFonts.lexend(
-              fontSize: 32,
-              fontWeight: FontWeight.bold,
-              color: AppColors.textPrimary,
+    return GestureDetector(
+      onTap: () {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => VitalsDetailScreen(
+              vitalCode: code,
+              vitalName: name,
+              color: color,
+              icon: icon,
             ),
           ),
-          const SizedBox(height: 4),
-          Text(
-            name,
-            style: TextStyle(fontSize: 14, color: AppColors.textSecondary),
-          ),
-        ],
+        );
+      },
+      child: Container(
+        height: 180,
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(color: color.withOpacity(0.1), width: 1),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: color.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Icon(icon, color: color, size: 24),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
+                  decoration: BoxDecoration(
+                    color: statusColor.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    status.toUpperCase(),
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600,
+                      color: statusColor,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const Spacer(),
+            Text(
+              value,
+              style: GoogleFonts.lexend(
+                fontSize: 32,
+                fontWeight: FontWeight.bold,
+                color: AppColors.textPrimary,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              name,
+              style: TextStyle(fontSize: 14, color: AppColors.textSecondary),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -596,10 +627,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
       Permission.location,
     ].request();
 
-    if (statuses[Permission.bluetoothScan]?.isDenied == true || 
+    if (statuses[Permission.bluetoothScan]?.isDenied == true ||
         statuses[Permission.bluetoothConnect]?.isDenied == true) {
-       // Ideally show dialog to user explaining why
-       debugPrint("Bluetooth permissions denied");
+      // Ideally show dialog to user explaining why
+      debugPrint("Bluetooth permissions denied");
     }
   }
 
@@ -635,14 +666,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
         padding: const EdgeInsets.all(20),
         decoration: BoxDecoration(
           gradient: const LinearGradient(
-            colors: [Color(0xFF4285F4), Color(0xFF9C27B0)], // Google Blue to Purple
+            colors: [
+              Color(0xFF4285F4),
+              Color(0xFF9C27B0),
+            ], // Google Blue to Purple
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
           ),
           borderRadius: BorderRadius.circular(24),
           boxShadow: [
-             BoxShadow(color: const Color(0xFF4285F4).withOpacity(0.3), blurRadius: 10, offset: const Offset(0, 4))
-          ]
+            BoxShadow(
+              color: const Color(0xFF4285F4).withOpacity(0.3),
+              blurRadius: 10,
+              offset: const Offset(0, 4),
+            ),
+          ],
         ),
         child: Row(
           children: [
@@ -650,7 +688,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
                 color: Colors.white.withOpacity(0.2),
-                shape: BoxShape.circle
+                shape: BoxShape.circle,
               ),
               child: const Icon(Icons.videocam, color: Colors.white, size: 28),
             ),
@@ -664,21 +702,22 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     style: TextStyle(
                       color: Colors.white,
                       fontSize: 18,
-                      fontWeight: FontWeight.bold
+                      fontWeight: FontWeight.bold,
                     ),
                   ),
                   SizedBox(height: 4),
                   Text(
                     "Real-time video & audio chat",
-                     style: TextStyle(
-                      color: Colors.white70,
-                      fontSize: 14,
-                    ),
-                  )
+                    style: TextStyle(color: Colors.white70, fontSize: 14),
+                  ),
                 ],
               ),
             ),
-            const Icon(Icons.arrow_forward_ios, color: Colors.white70, size: 16)
+            const Icon(
+              Icons.arrow_forward_ios,
+              color: Colors.white70,
+              size: 16,
+            ),
           ],
         ),
       ),

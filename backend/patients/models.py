@@ -40,6 +40,44 @@ class PatientProfile(models.Model):
     # One-to-One relationship with User
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='patient_profile')
     
+    # Eka.Care Patient Directory Integration
+    eka_patient_id = models.CharField(
+        max_length=100,
+        unique=True,
+        null=True,
+        blank=True,
+        help_text="Eka.Care patient_id (also called oid)"
+    )
+    eka_patient_created = models.BooleanField(
+        default=False,
+        help_text="Whether patient exists in Eka.Care directory"
+    )
+    eka_patient_created_at = models.DateTimeField(null=True, blank=True)
+    
+    # ABHA Integration (optional but recommended)
+    abha_number = models.CharField(
+        max_length=14,
+        unique=True,
+        null=True,
+        blank=True,
+        help_text="14-digit ABHA number (e.g., 12-3456-7890-1234)"
+    )
+    abha_address = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True,
+        help_text="ABHA address (e.g., patient@abdm)"
+    )
+    is_abha_verified = models.BooleanField(default=False)
+    abha_created_at = models.DateTimeField(null=True, blank=True)
+    
+    # Sync metadata
+    eka_sync_metadata = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Store sync status and additional Eka.Care data"
+    )
+    
     # Basic Information
     gender = models.CharField(max_length=1, choices=GENDER_CHOICES)
     blood_group = models.CharField(max_length=3, choices=BLOOD_GROUP_CHOICES, null=True, blank=True)
@@ -102,7 +140,22 @@ class PatientProfile(models.Model):
         ordering = ['-created_at']
     
     def __str__(self):
-        return f"Patient Profile: {self.user.get_full_name()}"
+        return f"Patient Profile: {self.user.get_full_name()} (Eka: {self.eka_patient_id})"
+
+    @property
+    def partner_patient_id(self):
+        """Partner patient ID sent to Eka.Care (our CarePAL ID)"""
+        return f"carepal_{self.id}"
+    
+    @property
+    def has_eka_patient(self):
+        """Check if patient exists in Eka.Care directory"""
+        return bool(self.eka_patient_id)
+    
+    @property
+    def has_abha(self):
+        """Check if patient has ABHA"""
+        return bool(self.abha_number)
     
     @property
     def bmi(self):

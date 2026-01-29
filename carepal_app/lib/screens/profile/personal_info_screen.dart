@@ -294,7 +294,7 @@ class _PersonalInfoScreenState extends State<PersonalInfoScreen> {
     required ValueChanged<String?>? onChanged,
   }) {
     return DropdownButtonFormField<String>(
-      value: items.contains(value) ? value : null,
+      initialValue: items.contains(value) ? value : null,
       onChanged: onChanged,
       decoration: InputDecoration(
         labelText: label,

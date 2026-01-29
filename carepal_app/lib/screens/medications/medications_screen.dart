@@ -8,6 +8,7 @@ import '../../widgets/error_view.dart';
 import '../../widgets/empty_state.dart';
 import 'medication_detail_screen.dart';
 import 'add_medication_screen.dart';
+import 'import_prescription_screen.dart';
 
 class MedicationsScreen extends StatefulWidget {
   const MedicationsScreen({super.key});
@@ -85,6 +86,24 @@ class _MedicationsScreenState extends State<MedicationsScreen>
             ),
           ],
         ),
+        actions: [
+          IconButton(
+            icon: const Icon(
+              Icons.cloud_download_outlined,
+              color: AppColors.textPrimary,
+            ),
+            tooltip: 'Import from Eka.Care',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const ImportPrescriptionScreen(),
+                ),
+              );
+            },
+          ),
+          const SizedBox(width: 8),
+        ],
         bottom: TabBar(
           controller: _tabController,
           labelColor: AppColors.primary,

@@ -5,6 +5,8 @@ import '../core/app_colors.dart';
 import '../providers/auth_provider.dart';
 import 'register_screen.dart';
 import 'dashboard_screen.dart';
+import 'profile/abha_login_screen.dart';
+import 'admin_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -327,6 +329,31 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                   ),
                 ),
+                const SizedBox(height: 24),
+
+                // ABHA Login Button
+                OutlinedButton.icon(
+                  onPressed: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => const AbhaLoginScreen(),
+                      ),
+                    );
+                  },
+                  icon: const Icon(FontAwesomeIcons.userShield),
+                  label: const Text('Login with ABHA'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.primary,
+                    side: BorderSide(color: AppColors.primary),
+                    padding: const EdgeInsets.symmetric(
+                      vertical: 16,
+                      horizontal: 24,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                  ),
+                ),
 
                 const SizedBox(height: 32),
 
@@ -358,6 +385,18 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                     ),
                   ],
+                ),
+
+                const SizedBox(height: 16),
+                TextButton.icon(
+                  onPressed: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => const AdminScreen()),
+                    );
+                  },
+                  icon: const Icon(Icons.admin_panel_settings_outlined),
+                  label: const Text('Admin Console'),
+                  style: TextButton.styleFrom(foregroundColor: Colors.blueGrey),
                 ),
 
                 const SizedBox(height: 16),

@@ -225,6 +225,31 @@ class MedicationProvider with ChangeNotifier {
     }
   }
 
+  // Import prescription
+  Future<int> importPrescription(String prescriptionId) async {
+    _isLoading = true;
+    _error = null;
+    _safeNotify();
+
+    try {
+      final medications = await _service.importPrescription(prescriptionId);
+
+      // Reload to show new medications
+      await loadMedications();
+      await loadTodaysSchedule();
+
+      _safeNotify();
+      return medications.length;
+    } catch (e) {
+      _error = e.toString();
+      _safeNotify();
+      return 0;
+    } finally {
+      _isLoading = false;
+      _safeNotify();
+    }
+  }
+
   // CRITICAL FIX: Request refresh that can be called during build
   void requestRefresh() {
     WidgetsBinding.instance.addPostFrameCallback((_) {

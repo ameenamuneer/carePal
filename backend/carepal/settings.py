@@ -53,6 +53,8 @@ INSTALLED_APPS = [
     'agent',
     'analytics',
     'family',
+    'appointments',
+    'abdm',
 ]
 
 MIDDLEWARE = [
@@ -236,5 +238,50 @@ os.makedirs(os.path.join(MEDIA_ROOT, 'reports', 'excel'), exist_ok=True)
 TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID', '')
 TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN', '')
 TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER', '')
+
+# ABDM Configuration
+ABDM_CONFIG = {
+    # Sandbox Configuration
+    'EKA_BASE_URL': 'https://api.eka.care',
+    'EKA_SANDBOX_URL': 'https://api.dev.eka.care',
+    'USE_SANDBOX': True,  # ✅ Must be True for testing
+    
+    # API Keys
+    'EKA_API_KEY': os.getenv('EKA_API_KEY', ''),
+    'EKA_SANDBOX_KEY': os.getenv('EKA_SANDBOX_KEY', ''),  # ⚠️ MUST BE SET
+    
+    # HIP Details (can be empty for PHR-only testing)
+    'HIP_ID': os.getenv('CAREPAL_HIP_ID', ''),
+    'HIP_NAME': 'CarePAL Health Services',
+    
+    # Webhook Configuration
+    'WEBHOOK_SECRET': os.getenv('ABDM_WEBHOOK_SECRET', 'test_secret_key'),
+    'CALLBACK_BASE_URL': os.getenv('ABDM_CALLBACK_URL', 'https://api.carepal.com'),
+}
+
+# Logging configuration
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '{levelname} {asctime} {module} {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+        },
+    },
+    'loggers': {
+        'abdm': {
+            'handlers': ['console'],
+            'level': 'DEBUG',
+            'propagate': False,
+        },
+    },
+}
 
 

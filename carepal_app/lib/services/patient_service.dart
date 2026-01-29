@@ -1,4 +1,5 @@
 import 'api_service.dart';
+import '../models/patient_profile.dart';
 
 /// Patient Service - Complete implementation
 /// Maps to backend/patients/views.py endpoints
@@ -114,7 +115,69 @@ class PatientService {
     }
   }
 
-  // ==================== PATIENT PROFILE ACTIONS ====================
+  // ==================== EKA.CARE & ABHA INTEGRATION ====================
+
+  /// Create patient in Eka.Care
+  /// POST /api/v1/patients/profiles/create_eka_patient/
+  Future<PatientProfile> createEkaPatient() async {
+    try {
+      final response = await _api.post(
+        '/api/v1/patients/profiles/create_eka_patient/',
+      );
+      return PatientProfile.fromJson(response.data['patient']);
+    } catch (e) {
+      throw Exception('Failed to create Eka patient: $e');
+    }
+  }
+
+  /// ABHA Registration Step 1: Generate OTP
+  Future<Map<String, dynamic>> registerAbhaStep1(String aadhaar) async {
+    try {
+      final response = await _api.post(
+        '/api/v1/patients/profiles/register_abha_step1/',
+        data: {'aadhaar_number': aadhaar},
+      );
+      return response.data;
+    } catch (e) {
+      throw Exception('Failed to generate ABHA OTP: $e');
+    }
+  }
+
+  /// ABHA Registration Step 2: Verify OTP
+  Future<Map<String, dynamic>> registerAbhaStep2(String otp) async {
+    try {
+      final response = await _api.post(
+        '/api/v1/patients/profiles/register_abha_step2/',
+        data: {'otp': otp},
+      );
+      return response.data;
+    } catch (e) {
+      throw Exception('Failed to verify ABHA OTP: $e');
+    }
+  }
+
+  /// ABHA Registration Step 3: Create ABHA
+  Future<PatientProfile> registerAbhaStep3(String abhaAddress) async {
+    try {
+      final response = await _api.post(
+        '/api/v1/patients/profiles/register_abha_step3/',
+        data: {'abha_address': abhaAddress},
+      );
+      return PatientProfile.fromJson(response.data['patient']);
+    } catch (e) {
+      throw Exception('Failed to create ABHA: $e');
+    }
+  }
+
+  /// Get current patient profile (Alias for getMyProfile with type return)
+  Future<PatientProfile> getCurrentPatient() async {
+    try {
+      final data = await getMyProfile();
+      return PatientProfile.fromJson(data);
+    } catch (e) {
+      throw Exception('Failed to load current patient: $e');
+    }
+  }
 
   /// Get health summary for a patient
   /// GET /api/v1/patients/profiles/{id}/health_summary/

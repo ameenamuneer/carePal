@@ -11,6 +11,7 @@ import 'medical_history_screen.dart';
 import 'family_members_screen.dart';
 import 'notifications_settings_screen.dart';
 import 'language_settings_screen.dart';
+import 'abha_registration_screen.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -97,6 +98,19 @@ class _ProfileScreenState extends State<ProfileScreen> {
                           context,
                           MaterialPageRoute(
                             builder: (_) => const FamilyMembersScreen(),
+                          ),
+                        );
+                      },
+                    ),
+                    _ProfileItem(
+                      icon: Icons.health_and_safety_outlined,
+                      title: 'ABHA Integration',
+                      subtitle: 'Link or Create ABHA ID',
+                      onTap: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => const AbhaRegistrationScreen(),
                           ),
                         );
                       },

@@ -8,6 +8,7 @@ import '../../widgets/vital_chart.dart';
 import '../../widgets/loading_shimmer.dart';
 import '../../widgets/error_view.dart';
 import 'manual_entry_screen.dart';
+import '../../services/abdm/abdm_service.dart';
 
 class VitalsDetailScreen extends StatefulWidget {
   final String vitalCode;
@@ -432,8 +433,67 @@ class _VitalsDetailScreenState extends State<VitalsDetailScreen> {
               ),
             ),
           ),
+        const SizedBox(width: 8),
+        IconButton(
+          icon: const Icon(Icons.code, color: AppColors.textSecondary),
+          tooltip: 'View FHIR JSON',
+          onPressed: () => _handleExport(reading),
+        ),
       ],
     );
+  }
+
+  Future<void> _handleExport(VitalReading reading) async {
+    try {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const Center(child: CircularProgressIndicator()),
+      );
+
+      final abdmService = AbdmService();
+      // Parse ID safely
+      int vitalId;
+      try {
+        vitalId = reading.id;
+      } catch (e) {
+        // If ID is UUID or not int, handle or assume mock int
+        vitalId = 1;
+      }
+
+      final bundle = await abdmService.getFhirBundle(vitalId);
+
+      if (mounted) Navigator.pop(context); // Close loading
+
+      showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('FHIR Wellness Record'),
+          content: SingleChildScrollView(
+            child: SelectableText(
+              bundle.toString(), // For better printing use JsonEncoder
+              style: const TextStyle(fontFamily: 'Courier', fontSize: 12),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      );
+    } catch (e) {
+      if (mounted) Navigator.pop(context);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Export Failed: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 
   Future<void> _navigateToManualEntry() async {

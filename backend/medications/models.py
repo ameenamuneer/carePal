@@ -62,6 +62,12 @@ class Medication(models.Model):
         ('DISCONTINUED', 'Discontinued'),
         ('ON_HOLD', 'On Hold'),
     ]
+
+    SOURCE_CHOICES = [
+        ('MANUAL', 'Manual Entry'),
+        ('EKA_CARE', 'Imported from Eka.Care'),
+        ('HOSPITAL', 'Hospital System'),
+    ]
     
     patient = models.ForeignKey(
         PatientProfile,
@@ -73,6 +79,20 @@ class Medication(models.Model):
     medication_name = models.CharField(max_length=200)
     generic_name = models.CharField(max_length=200, blank=True)
     brand_name = models.CharField(max_length=200, blank=True)
+
+    # Source tracking
+    source = models.CharField(
+        max_length=20,
+        choices=SOURCE_CHOICES,
+        default='MANUAL'
+    )
+    
+    # Eka.Care prescription metadata
+    eka_prescription_id = models.CharField(max_length=100, null=True, blank=True)
+    eka_drug_id = models.CharField(max_length=100, null=True, blank=True)
+    eka_imported_at = models.DateTimeField(null=True, blank=True)
+    
+    metadata = models.JSONField(default=dict, blank=True)
     
     # Dosage Information
     dosage = models.CharField(

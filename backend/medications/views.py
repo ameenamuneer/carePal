@@ -21,6 +21,8 @@ from .serializers import (
     MedicationAdherencePatternSerializer
 )
 from patients.models import PatientProfile
+from ekacare.authentication import EkaCareAuth, EkaCareAPIException
+from django.db import transaction
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +102,138 @@ class MedicationViewSet(viewsets.ModelViewSet):
         
         output_serializer = MedicationDetailSerializer(medication)
         return Response(output_serializer.data)
+    
+    @action(detail=False, methods=['post'])
+    def import_prescription(self, request):
+        """
+        Import prescription - USES EKA PATIENT ID
+        """
+        try:
+            prescription_id = request.data.get('prescription_id')
+            patient = request.user.patient_profile
+            
+            # Ensure patient exists in Eka.Care
+            if not patient.has_eka_patient:
+                return Response(
+                    {'error': 'Patient not registered in Eka.Care. Create patient first.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Fetch prescription from Eka.Care
+            eka_prescription = EkaCareAuth.make_request(
+                'GET',
+                f'/dr/v1/prescription/{prescription_id}'
+            )
+            
+            # Verify patient match
+            prescription_patient_id = eka_prescription.get('patient_id')
+            prescription_partner_id = eka_prescription.get('partner_patient_id')
+            
+            # Match by either eka_patient_id or partner_patient_id
+            if (prescription_patient_id != patient.eka_patient_id and 
+                prescription_partner_id != patient.partner_patient_id):
+                return Response(
+                    {'error': 'Prescription does not belong to this patient'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            
+            # Import and store medications
+            medications = self._import_and_store_medications(
+                eka_prescription,
+                patient,
+                prescription_id
+            )
+            
+            serializer = MedicationListSerializer(medications, many=True)
+            
+            return Response({
+                'success': True,
+                'medications': serializer.data,
+                'count': len(medications)
+            }, status=status.HTTP_201_CREATED)
+            
+        except EkaCareAPIException as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+    def _import_and_store_medications(
+        self, 
+        eka_prescription, 
+        patient, 
+        prescription_id
+    ):
+        """
+        Transform Eka.Care prescription data and store in CarePAL DB
+        """
+        medications = []
+        time_map = {
+            'MORN': '08:00:00',
+            'AFT': '14:00:00',
+            'EVE': '18:00:00',
+            'NIGHT': '21:00:00'
+        }
+        
+        with transaction.atomic():
+            for detail in eka_prescription.get('prescription_details', []):
+                # Only process medication requests
+                if detail.get('resource_type') != 'medicationrequest':
+                    continue
+                
+                med_name = detail.get('med_name')
+                if not med_name:
+                    continue
+                
+                # Extract data
+                dosage = detail.get('dose', {})
+                duration = detail.get('duration', {})
+                instructions = detail.get('dosage_instruction', {})
+                
+                # Create Medication in CarePAL DB
+                medication = Medication.objects.create(
+                    patient=patient,
+                    medication_name=med_name,
+                    generic_name=detail.get('generic_name', ''),
+                    dosage=str(dosage.get('value', 1)) + ' ' + dosage.get('unit', 'tablet'),
+                    form='TABLET',  # Defaulting
+                    route='ORAL',   # Default
+                    frequency='ONCE_DAILY', # Simplified default
+                    times_per_day=duration.get('frequency', 1),
+                    start_date=timezone.now().date(),
+                    duration_days=duration.get('value', 0),
+                    instructions=detail.get('note', ''),
+                    status='ACTIVE',
+                    
+                    # Track Eka.Care source
+                    source='EKA_CARE',
+                    eka_prescription_id=prescription_id,
+                    eka_drug_id=detail.get('partner_drug_id'),
+                    eka_imported_at=timezone.now(),
+                    
+                    # Store full metadata
+                    metadata={
+                        'eka_prescription': prescription_id,
+                        'eka_drug_id': detail.get('partner_drug_id'),
+                        'snomed_id': detail.get('snomed_id'),
+                        'custom_dosage': dosage.get('custom'),
+                        'imported_at': timezone.now().isoformat()
+                    }
+                )
+                
+                # Create schedules
+                times = instructions.get('when', [])
+                for time_key in times:
+                    scheduled_time = time_map.get(time_key, '08:00:00')
+                    MedicationSchedule.objects.create(
+                        medication=medication,
+                        time_of_day=scheduled_time,
+                        is_active=True
+                    )
+                
+                medications.append(medication)
+        
+        return medications
     
     @action(detail=False, methods=['get'])
     def active(self, request):
