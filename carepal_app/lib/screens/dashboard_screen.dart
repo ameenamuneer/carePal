@@ -57,7 +57,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
     try {
       // Load essential data
       await Future.wait([
-        context.read<VitalsProvider>().loadReadings(days: 7),
+        context
+            .read<VitalsProvider>()
+            .loadDashboardVitals(), // FIXED: Use dedicated dashboard loader
         context.read<VitalsProvider>().loadVitalTypes(),
         context.read<MedicationProvider>().loadTodaysSchedule(),
         context.read<MedicationProvider>().loadAdherenceRate(days: 7),
@@ -354,14 +356,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Widget _buildVitalsGridFromProvider() {
     return Consumer<VitalsProvider>(
       builder: (context, provider, _) {
-        if (provider.isLoading && provider.readings.isEmpty) {
+        // FIXED: Check dashboard state instead of history list
+        if (provider.isLoading && provider.dashboardVitals.isEmpty) {
           return _buildVitalsLoadingGrid();
         }
 
         // Group readings by vital type
         final vitalsByType = <String, Map<String, dynamic>>{};
 
-        for (final reading in provider.readings) {
+        // FIXED: Use dashboardVitals source
+        for (final reading in provider.dashboardVitals) {
           // Find the vital type by CODE first, then by ID
           final vitalType = provider.vitalTypes.firstWhere(
             (vt) =>

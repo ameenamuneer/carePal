@@ -9,12 +9,16 @@ class VitalsProvider with ChangeNotifier {
   final VitalsService _service = VitalsService();
 
   List<VitalReading> _readings = [];
+  Map<String, VitalReading> _dashboardVitals =
+      {}; // New: Separate state for dashboard
   List<VitalType> _vitalTypes = [];
   VitalReading? _latestReading;
   bool _isLoading = false;
   String? _error;
 
   List<VitalReading> get readings => _readings;
+  List<VitalReading> get dashboardVitals =>
+      _dashboardVitals.values.toList(); // Expose as list for UI
   List<VitalType> get vitalTypes => _vitalTypes;
   VitalReading? get latestReading => _latestReading;
   bool get isLoading => _isLoading;
@@ -83,6 +87,56 @@ class VitalsProvider with ChangeNotifier {
     } finally {
       _isLoading = false;
       _safeNotify(); // FIXED: Use post-frame callback
+    }
+  }
+
+  // NEW: Load dashboard vitals (latest values for all types)
+  Future<void> loadDashboardVitals() async {
+    // Only set loading if not already loading
+    if (_isLoading) return;
+
+    _isLoading = true;
+    _error = null;
+    _safeNotify();
+
+    try {
+      if (_vitalTypes.isEmpty) {
+        await _loadVitalTypesSilent();
+      }
+
+      final results = await _service.getLatestReadings();
+      final readings = results.map((i) => VitalReading.fromJson(i)).toList();
+
+      // Clear and rebuild map
+      _dashboardVitals.clear();
+      for (final reading in readings) {
+        // Find vital code
+        String key = reading.vitalCode;
+        // Try to find code from types if missing in reading
+        if (key.isEmpty || key == 'UNKNOWN') {
+          final type = _vitalTypes.firstWhere(
+            (t) => t.id == reading.vitalTypeId,
+            orElse: () => VitalType(
+              id: -1,
+              code: 'UNKNOWN',
+              name: '',
+              unit: '',
+              category: '',
+            ),
+          );
+          if (type.id != -1) key = type.code;
+        }
+
+        if (key != 'UNKNOWN') {
+          _dashboardVitals[key] = reading;
+        }
+      }
+    } catch (e) {
+      _error = e.toString();
+      debugPrint('Error loading dashboard vitals: $e');
+    } finally {
+      _isLoading = false;
+      _safeNotify();
     }
   }
 
@@ -190,6 +244,25 @@ class VitalsProvider with ChangeNotifier {
       _readings.insert(0, reading);
       _latestReading = reading;
 
+      // Update dashboard state map
+      String code = reading.vitalCode;
+      if (code == 'UNKNOWN' && _vitalTypes.isNotEmpty) {
+        final type = _vitalTypes.firstWhere(
+          (t) => t.id == vitalTypeId,
+          orElse: () => VitalType(
+            id: -1,
+            code: 'UNKNOWN',
+            name: '',
+            unit: '',
+            category: '',
+          ),
+        );
+        if (type.id != -1) code = type.code;
+      }
+      if (code != 'UNKNOWN') {
+        _dashboardVitals[code] = reading;
+      }
+
       _error = null;
       _safeNotify(); // FIXED: Use post-frame callback
       return true;
@@ -227,7 +300,7 @@ class VitalsProvider with ChangeNotifier {
   // Clear error
   void clearError() {
     _error = null;
-    _safeNotify(); // FIXED: Use post-frame callback
+    _safeNotify();
   }
 
   // CRITICAL FIX: Request refresh that can be called during build
