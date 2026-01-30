@@ -182,7 +182,7 @@ def verify_login_view(request):
 @permission_classes([IsAuthenticated])
 def complete_login_view(request):
     """
-    POST /api/v1/abdm/login/login/
+    POST /api/v1/abdm/login/
     Complete login by selecting ABHA address (Step 3)
     Only needed when skip_state is 'abha_select'
     """
@@ -336,16 +336,16 @@ def initiate_linking_view(request):
     client = EKAClient()
     
     txn_id = request.data.get('txn_id')
-    patient = request.data.get('patient')
-    care_contexts = request.data.get('care_contexts')
+    patient_ref_id = request.data.get('patient_ref_id')
+    cc_ref_id = request.data.get('cc_ref_id')
     
-    if not txn_id or not patient or not care_contexts:
-        return Response({'error': 'txn_id, patient, and care_contexts are required'}, status=400)
+    if not txn_id or not patient_ref_id or not cc_ref_id:
+        return Response({'error': 'txn_id, patient_ref_id, and cc_ref_id are required'}, status=400)
 
     try:
         oid = getattr(request.user.patient_profile, 'oid', None) if hasattr(request.user, 'patient_profile') else None
         
-        result = client.initiate_link_care_contexts(txn_id, patient, care_contexts, oid=oid)
+        result = client.initiate_link_care_contexts(txn_id, patient_ref_id, cc_ref_id, oid=oid)
         return Response(result, status=200)
     except Exception as e:
         logger.error(f"Link init failed: {str(e)}")

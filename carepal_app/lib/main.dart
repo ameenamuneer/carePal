@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'dart:async';
 import 'services/api_service.dart';
 import 'providers/auth_provider.dart';
 import 'providers/dashboard_provider.dart';
@@ -16,29 +17,55 @@ import 'screens/dashboard_screen.dart'; // Ensure DashboardScreen is imported fo
 import 'core/app_theme.dart'; // Using existing AppTheme
 
 void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
+  runZonedGuarded(
+    () async {
+      WidgetsFlutterBinding.ensureInitialized();
+      print("🚀 [DEBUG] App Starting...");
 
-  // Initialize API service
-  final apiService = ApiService();
-  apiService.initialize();
-  await apiService.loadTokens();
+      // Initialize API service
+      try {
+        final apiService = ApiService();
+        apiService.initialize();
+        print("✅ [DEBUG] ApiService Initialized");
 
-  runApp(
-    MultiProvider(
-      providers: [
-        ChangeNotifierProvider(create: (_) => AuthProvider()),
-        ChangeNotifierProvider(create: (_) => DashboardProvider()),
-        ChangeNotifierProvider(create: (_) => VitalsProvider()),
-        ChangeNotifierProvider(create: (_) => MedicationProvider()),
-        ChangeNotifierProvider(create: (_) => DeviceProvider()),
-        ChangeNotifierProvider(create: (_) => FamilyProvider()),
-        ChangeNotifierProvider(create: (_) => AIAgentProvider()),
-        ChangeNotifierProvider(create: (_) => ProfileProvider()),
-        ChangeNotifierProvider(create: (_) => AbdmProvider()),
-        ChangeNotifierProvider(create: (_) => BleServoService()),
-      ],
-      child: const CarePalApp(),
-    ),
+        await apiService.loadTokens();
+        print("✅ [DEBUG] Tokens Loaded");
+      } catch (e, stack) {
+        print("❌ [DEBUG] API Init Failed: $e\n$stack");
+      }
+
+      print("🚀 [DEBUG] Calling runApp...");
+      runApp(
+        MultiProvider(
+          providers: [
+            ChangeNotifierProvider(
+              create: (_) {
+                print("📦 [DEBUG] Init AuthProvider");
+                return AuthProvider();
+              },
+            ),
+            ChangeNotifierProvider(create: (_) => DashboardProvider()),
+            ChangeNotifierProvider(create: (_) => VitalsProvider()),
+            ChangeNotifierProvider(create: (_) => MedicationProvider()),
+            ChangeNotifierProvider(create: (_) => DeviceProvider()),
+            ChangeNotifierProvider(create: (_) => FamilyProvider()),
+            ChangeNotifierProvider(create: (_) => AIAgentProvider()),
+            ChangeNotifierProvider(create: (_) => ProfileProvider()),
+            ChangeNotifierProvider(create: (_) => AbdmProvider()),
+            ChangeNotifierProvider(
+              create: (_) {
+                print("📦 [DEBUG] Init BleServoService");
+                return BleServoService();
+              },
+            ),
+          ],
+          child: const CarePalApp(),
+        ),
+      );
+    },
+    (error, stack) {
+      print("🔥 [CRITICAL] Uncaught Error in main: $error\n$stack");
+    },
   );
 }
 

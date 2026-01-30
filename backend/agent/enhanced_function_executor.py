@@ -50,6 +50,8 @@ class EnhancedFunctionExecutor:
                 'send_sms_notification': self._send_sms_notification,
                 'schedule_task': self._schedule_task,
                 'update_patient_notes': self._update_patient_notes,
+                'mark_medication_taken': self._mark_medication_taken,
+                'mark_medication_skipped': self._mark_medication_skipped,
             }
             
             if function_name not in executor_map:
@@ -1027,4 +1029,161 @@ class EnhancedFunctionExecutor:
         
         except Exception as e:
             logger.error(f"Error in _update_patient_notes: {e}")
+            return {'success': False, 'error': str(e)}
+
+    @transaction.atomic
+    def _mark_medication_taken(self, params: Dict) -> Dict:
+        """Mark medication as taken"""
+        from medications.models import Medication, MedicationAdherence, MedicationSchedule
+
+        try:
+            med_name = params['medication_name']
+            time_label = params.get('time_label')
+            notes = params.get('notes', 'Recorded via AI')
+            today = timezone.now().date()
+            now = timezone.now()
+
+            # Find medication
+            medication = Medication.objects.filter(
+                patient=self.patient,
+                medication_name__icontains=med_name,
+                status='ACTIVE'
+            ).first()
+
+            if not medication:
+                return {'success': False, 'error': f'Medication "{med_name}" not found or inactive'}
+
+            # Find specific schedule/adherence
+            adherence = None
+            
+            if time_label:
+                # Try to find specific schedule first
+                schedule = MedicationSchedule.objects.filter(
+                    medication=medication,
+                    time_label__iexact=time_label,
+                    is_active=True
+                ).first()
+                
+                if schedule:
+                    dt = datetime.combine(today, schedule.time_of_day)
+                    defaults = {
+                        'status': 'SCHEDULED',
+                        'scheduled_time': schedule.time_of_day,
+                        'scheduled_datetime': timezone.make_aware(dt) if timezone.is_naive(dt) else dt
+                    }
+                    adherence, _ = MedicationAdherence.objects.get_or_create(
+                        medication=medication,
+                        schedule=schedule,
+                        scheduled_date=today,
+                        defaults=defaults
+                    )
+            
+            if not adherence:
+                # Find pending schedule closest to now
+                # Or existing adherence that is SCHEDULED
+                pending_adherence = MedicationAdherence.objects.filter(
+                    medication=medication,
+                    scheduled_date=today,
+                    status='SCHEDULED'
+                ).first()
+                
+                if pending_adherence:
+                    adherence = pending_adherence
+                else:
+                    # If no adherence record exists yet, create for next schedule
+                    # Logic simplified: Get first active schedule
+                    schedule = medication.schedules.filter(is_active=True).order_by('time_of_day').first()
+                    if schedule:
+                        dt = datetime.combine(today, schedule.time_of_day)
+                        defaults = {
+                            'status': 'SCHEDULED',
+                            'scheduled_time': schedule.time_of_day,
+                            'scheduled_datetime': timezone.make_aware(dt) if timezone.is_naive(dt) else dt
+                        }
+                        adherence, _ = MedicationAdherence.objects.get_or_create(
+                            medication=medication,
+                            schedule=schedule,
+                            scheduled_date=today,
+                            defaults=defaults
+                        )
+            
+            if not adherence:
+                return {'success': False, 'error': f'No scheduled dose found for {med_name} today'}
+
+            # Update status
+            adherence.status = 'TAKEN'
+            adherence.actual_datetime = now
+            adherence.notes = notes
+            adherence.save()
+
+            return {
+                'success': True,
+                'messsage': f'Marked {medication.medication_name} as TAKEN',
+                'taken_at': now.strftime('%H:%M')
+            }
+
+        except Exception as e:
+            logger.error(f"Error in _mark_medication_taken: {e}")
+            return {'success': False, 'error': str(e)}
+
+    @transaction.atomic
+    def _mark_medication_skipped(self, params: Dict) -> Dict:
+        """Mark medication as skipped"""
+        from medications.models import Medication, MedicationAdherence
+
+        try:
+            med_name = params['medication_name']
+            reason = params.get('reason', 'Skipped via AI')
+            today = timezone.now().date()
+
+            # Find medication
+            medication = Medication.objects.filter(
+                patient=self.patient,
+                medication_name__icontains=med_name,
+                status='ACTIVE'
+            ).first()
+
+            if not medication:
+                return {'success': False, 'error': f'Medication "{med_name}" not found'}
+
+            # Find pending adherence
+            adherence = MedicationAdherence.objects.filter(
+                medication=medication,
+                scheduled_date=today,
+                status='SCHEDULED'
+            ).first()
+            
+            if not adherence:
+                # If no specific scheduled dose is pending, check if any exists at all
+                # or create one for the first schedule to mark it skipped
+                schedule = medication.schedules.filter(is_active=True).first()
+                if schedule:
+                     dt = datetime.combine(today, schedule.time_of_day)
+                     defaults = {
+                        'status': 'SCHEDULED',
+                        'scheduled_time': schedule.time_of_day,
+                        'scheduled_datetime': timezone.make_aware(dt) if timezone.is_naive(dt) else dt
+                     }
+                     adherence, _ = MedicationAdherence.objects.get_or_create(
+                        medication=medication,
+                        schedule=schedule,
+                        scheduled_date=today,
+                        defaults=defaults
+                    )
+
+            if not adherence:
+                 return {'success': False, 'error': f'No scheduled dose to skip for {med_name}'}
+
+            adherence.status = 'SKIPPED' 
+            adherence.notes = f"Reason: {reason}"
+            adherence.save()
+
+            return {
+                'success': True,
+                'messsage': f'Marked {medication.medication_name} as SKIPPED',
+                'reason': reason
+            }
+
+        except Exception as e:
+            logger.error(f"Error in _mark_medication_skipped: {e}")
             return {'success': False, 'error': str(e)}

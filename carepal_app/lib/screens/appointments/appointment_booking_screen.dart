@@ -5,7 +5,7 @@ import '../../models/appointment.dart';
 import 'package:intl/intl.dart';
 
 class AppointmentBookingScreen extends StatefulWidget {
-  const AppointmentBookingScreen({Key? key}) : super(key: key);
+  const AppointmentBookingScreen({super.key});
 
   @override
   _AppointmentBookingScreenState createState() =>
@@ -122,7 +122,7 @@ class _AppointmentBookingScreenState extends State<AppointmentBookingScreen> {
             ),
             const SizedBox(height: 8),
             DropdownButtonFormField<String>(
-              value: _selectedDoctorId,
+              initialValue: _selectedDoctorId,
               items: _doctors
                   .map(
                     (d) => DropdownMenuItem(

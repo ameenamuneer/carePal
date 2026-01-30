@@ -1,9 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
-import '../../core/app_colors.dart';
 import 'profile/abha_registration_screen.dart';
 import 'profile/phr_onboarding_screen.dart';
-import 'profile/requests_list_screen.dart';
 import 'login_screen.dart';
 import '../services/api_service.dart';
 

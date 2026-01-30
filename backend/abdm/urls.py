@@ -9,7 +9,7 @@ urlpatterns = [
     # Login Flow
     path('login/init/', views.initiate_login_view, name='login-init'),
     path('login/verify/', views.verify_login_view, name='login-verify'),
-    path('login/login/', views.complete_login_view, name='login-complete'),
+    path('login/complete/', views.complete_login_view, name='login-complete'),
 
     # Consent Management
     path('consents/approve', views.approve_consent_view, name='consent-approve'),

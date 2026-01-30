@@ -9,16 +9,19 @@ class VitalsProvider with ChangeNotifier {
   final VitalsService _service = VitalsService();
 
   List<VitalReading> _readings = [];
-  Map<String, VitalReading> _dashboardVitals =
-      {}; // New: Separate state for dashboard
+  Map<String, VitalReading> _dashboardVitals = {}; // Legacy: Latest reading map
+  Map<String, Map<String, dynamic>> _dashboardSummaries =
+      {}; // New: Full summary with history
+
   List<VitalType> _vitalTypes = [];
   VitalReading? _latestReading;
   bool _isLoading = false;
   String? _error;
 
   List<VitalReading> get readings => _readings;
-  List<VitalReading> get dashboardVitals =>
-      _dashboardVitals.values.toList(); // Expose as list for UI
+  List<VitalReading> get dashboardVitals => _dashboardVitals.values.toList();
+  Map<String, Map<String, dynamic>> get dashboardSummaries =>
+      _dashboardSummaries; // Expose full summaries
   List<VitalType> get vitalTypes => _vitalTypes;
   VitalReading? get latestReading => _latestReading;
   bool get isLoading => _isLoading;
@@ -29,6 +32,41 @@ class VitalsProvider with ChangeNotifier {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       notifyListeners();
     });
+  }
+
+  // Helper to resolve vital type ID from code or fuzzy name
+  int? _resolveVitalTypeId(dynamic identifier) {
+    if (identifier is int) return identifier;
+    if (identifier is! String) return null;
+    if (_vitalTypes.isEmpty) return null;
+
+    // 1. Exact match on code
+    try {
+      final type = _vitalTypes.firstWhere((t) => t.code == identifier);
+      return type.id;
+    } catch (_) {}
+
+    // 2. Fuzzy match
+    final search = identifier.toUpperCase();
+    for (final type in _vitalTypes) {
+      final name = type.name.toUpperCase();
+      final code = type.code.toUpperCase();
+
+      if (search == 'HR' &&
+          (name.contains('HEART RATE') || code == 'HEART_RATE'))
+        return type.id;
+      if (search == 'BP' &&
+          (name.contains('BLOOD PRESSURE') || code.contains('BP')))
+        return type.id;
+      if (search == 'TEMP' &&
+          (name.contains('TEMPERATURE') || code.contains('TEMP')))
+        return type.id;
+      if (search == 'SPO2' &&
+          (name.contains('OXYGEN') || code.contains('SPO2')))
+        return type.id;
+    }
+
+    return null;
   }
 
   // Load vitals readings
@@ -46,20 +84,15 @@ class VitalsProvider with ChangeNotifier {
     _safeNotify(); // FIXED: Use post-frame callback
 
     try {
-      // Resolve vitalTypeId if String code provided
+      // Ensure types are loaded
+      if (_vitalTypes.isEmpty) {
+        await _loadVitalTypesSilent();
+      }
+
+      // Resolve vitalTypeId
       int? resolvedTypeId = vitalTypeId;
       if (resolvedTypeId == null && vitalType != null) {
-        if (_vitalTypes.isEmpty) {
-          await _loadVitalTypesSilent();
-        }
-        final type = _vitalTypes.firstWhere(
-          (t) => t.code == vitalType,
-          orElse: () =>
-              VitalType(id: -1, name: '', code: '', unit: '', category: ''),
-        );
-        if (type.id != -1) {
-          resolvedTypeId = type.id;
-        }
+        resolvedTypeId = _resolveVitalTypeId(vitalType);
       }
 
       // Calculate start date
@@ -70,6 +103,7 @@ class VitalsProvider with ChangeNotifier {
         vitalTypeId: resolvedTypeId,
         startDate: startDate.toIso8601String(),
         endDate: endDate.toIso8601String(),
+        pageSize: 100, // Increase page size to get more history
       );
 
       if (response['results'] != null) {
@@ -90,7 +124,7 @@ class VitalsProvider with ChangeNotifier {
     }
   }
 
-  // NEW: Load dashboard vitals (latest values for all types)
+  // NEW: Load dashboard vitals (latest values + history)
   Future<void> loadDashboardVitals() async {
     // Only set loading if not already loading
     if (_isLoading) return;
@@ -104,32 +138,24 @@ class VitalsProvider with ChangeNotifier {
         await _loadVitalTypesSilent();
       }
 
-      final results = await _service.getLatestReadings();
-      final readings = results.map((i) => VitalReading.fromJson(i)).toList();
+      // Fetch full summary from backend
+      final summaryList = await _service.getVitalsSummary();
 
-      // Clear and rebuild map
+      // Clear and rebuild maps
       _dashboardVitals.clear();
-      for (final reading in readings) {
-        // Find vital code
-        String key = reading.vitalCode;
-        // Try to find code from types if missing in reading
-        if (key.isEmpty || key == 'UNKNOWN') {
-          final type = _vitalTypes.firstWhere(
-            (t) => t.id == reading.vitalTypeId,
-            orElse: () => VitalType(
-              id: -1,
-              code: 'UNKNOWN',
-              name: '',
-              unit: '',
-              category: '',
-            ),
-          );
-          if (type.id != -1) key = type.code;
+      _dashboardSummaries.clear();
+
+      for (final item in summaryList) {
+        final vitalCode = item['vital_code'] as String? ?? 'UNKNOWN';
+
+        // 1. Polulate Legacy Map (Latest Reading only)
+        if (item['latest_reading'] != null) {
+          final reading = VitalReading.fromJson(item['latest_reading']);
+          _dashboardVitals[vitalCode] = reading;
         }
 
-        if (key != 'UNKNOWN') {
-          _dashboardVitals[key] = reading;
-        }
+        // 2. Populate New Map (Full Summary)
+        _dashboardSummaries[vitalCode] = item as Map<String, dynamic>;
       }
     } catch (e) {
       _error = e.toString();
@@ -149,17 +175,7 @@ class VitalsProvider with ChangeNotifier {
         await _loadVitalTypesSilent();
       }
 
-      int? vitalTypeId;
-      if (vitalIdentifier is int) {
-        vitalTypeId = vitalIdentifier;
-      } else if (vitalIdentifier is String) {
-        final type = _vitalTypes.firstWhere(
-          (t) => t.code == vitalIdentifier,
-          orElse: () =>
-              VitalType(id: -1, name: '', code: '', unit: '', category: ''),
-        );
-        if (type.id != -1) vitalTypeId = type.id;
-      }
+      int? vitalTypeId = _resolveVitalTypeId(vitalIdentifier);
 
       final results = await _service.getLatestReadings();
       final readings = results.map((i) => VitalReading.fromJson(i)).toList();
@@ -280,20 +296,18 @@ class VitalsProvider with ChangeNotifier {
   // Get readings for specific vital type
   // Supports String code lookup
   List<VitalReading> getReadingsByType(dynamic vitalIdentifier) {
-    if (vitalIdentifier is int) {
-      return _readings.where((r) => r.vitalTypeId == vitalIdentifier).toList();
-    } else if (vitalIdentifier is String) {
-      // Try to find the type ID
-      final type = _vitalTypes.firstWhere(
-        (t) => t.code == vitalIdentifier,
-        orElse: () =>
-            VitalType(id: -1, name: '', code: '', unit: '', category: ''),
-      );
-      if (type.id != -1) {
-        return _readings.where((r) => r.vitalTypeId == type.id).toList();
-      }
-      return [];
+    int? typeId = _resolveVitalTypeId(vitalIdentifier);
+
+    if (typeId != null) {
+      return _readings.where((r) => r.vitalTypeId == typeId).toList();
     }
+
+    // Fallback: if resolution failed but we have readings (unlikely if loadReadings used same logic)
+    // Return all readings if they seem to match strictly
+    if (vitalIdentifier is String) {
+      return _readings.where((r) => r.vitalCode == vitalIdentifier).toList();
+    }
+
     return [];
   }
 

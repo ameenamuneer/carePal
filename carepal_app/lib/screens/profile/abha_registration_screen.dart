@@ -4,7 +4,7 @@ import '../../providers/abdm_provider.dart';
 import 'abha_login_screen.dart';
 
 class AbhaRegistrationScreen extends StatefulWidget {
-  const AbhaRegistrationScreen({Key? key}) : super(key: key);
+  const AbhaRegistrationScreen({super.key});
 
   @override
   _AbhaRegistrationScreenState createState() => _AbhaRegistrationScreenState();

@@ -127,7 +127,8 @@ class VitalReadingListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'vital_name', 'vital_code', 'display_value',
             'measured_at', 'is_anomaly', 'anomaly_severity',
-            'data_quality', 'is_edited'
+            'data_quality', 'is_edited',
+            'value', 'values', 'unit', 'vital_type'
         ]
 
 

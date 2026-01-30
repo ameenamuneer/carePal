@@ -103,6 +103,46 @@ ENHANCED_FUNCTION_DECLARATIONS = [
             "required": ["medication_name"]
         }
     },
+    {
+        "name": "mark_medication_taken",
+        "description": "Mark a medication as taken. Use when patient confirms they have taken their medicine.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "medication_name": {
+                    "type": "string",
+                    "description": "Name of the medication"
+                },
+                "time_label": {
+                    "type": "string",
+                    "description": "Time of day (e.g. 'Morning', 'Lunch', 'Evening') or null for auto-detect"
+                },
+                "notes": {
+                    "type": "string",
+                    "description": "Any notes from patient"
+                }
+            },
+            "required": ["medication_name"]
+        }
+    },
+    {
+        "name": "mark_medication_skipped",
+        "description": "Mark a medication as skipped. Use when patient indicates they missed or skipped a dose.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "medication_name": {
+                    "type": "string",
+                    "description": "Name of the medication"
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Reason for skipping"
+                }
+            },
+            "required": ["medication_name", "reason"]
+        }
+    },
     
     # ==================== ALERTS & HEALTH STATUS ====================
     {
@@ -370,6 +410,8 @@ FUNCTION_PERMISSIONS = {
     "send_sms_notification": {"requires_permission": False},
     "schedule_task": {"requires_permission": False},
     "update_patient_notes": {"requires_permission": False},
+    "mark_medication_taken": {"requires_permission": False},
+    "mark_medication_skipped": {"requires_permission": False},
 }
 
 

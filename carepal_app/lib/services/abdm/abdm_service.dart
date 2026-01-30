@@ -108,7 +108,7 @@ class AbdmService {
   ) async {
     try {
       final response = await _api.post(
-        '$_basePath/login/login/',
+        '$_basePath/login/complete/',
         data: {'txn_id': txnId, 'abha_address': abhaAddress},
       );
 

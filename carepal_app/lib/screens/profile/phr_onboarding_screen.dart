@@ -22,7 +22,7 @@ class _PhrOnboardingScreenState extends State<PhrOnboardingScreen> {
   // Discovery Results
   String? _txnId;
   List<dynamic> _patientRecords = [];
-  List<dynamic> _selectedContexts = [];
+  final List<dynamic> _selectedContexts = [];
   Map<String, dynamic>? _selectedPatient;
 
   @override
@@ -300,8 +300,9 @@ class _PhrOnboardingScreenState extends State<PhrOnboardingScreen> {
                           _selectedContexts.removeWhere(
                             (c) => c['id'] == ctx['id'],
                           );
-                          if (_selectedContexts.isEmpty)
+                          if (_selectedContexts.isEmpty) {
                             _selectedPatient = null;
+                          }
                         }
                       });
                     },

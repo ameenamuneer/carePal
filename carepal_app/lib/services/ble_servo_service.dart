@@ -5,7 +5,8 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 class BleServoService extends ChangeNotifier {
   static const String _serviceUuid = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
-  static const String _charPositionUuid = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+  static const String _charPositionUuid =
+      "beb5483e-36e1-4688-b7f5-ea07361b26a8";
   static const String _charDeltaUuid = "82487627-2432-4148-9366-0775d78705f1";
   static const String _charMinUuid = "3c6f6261-30d8-4d57-8149-5f25712e5491";
   static const String _charMaxUuid = "b18d2777-7c15-4674-8849-0ec60d375225";
@@ -34,12 +35,16 @@ class BleServoService extends ChangeNotifier {
 
   String _maxPosition = "--";
   String get maxPosition => _maxPosition;
-  
+
   // Log messages for the admin console
   final List<String> _logs = [];
   List<String> get logs => List.unmodifiable(_logs);
 
   BleServoService() {
+    // _init(); // Lazy load instead to prevent startup crashes
+  }
+
+  void initialize() {
     _init();
   }
 
@@ -52,7 +57,12 @@ class BleServoService extends ChangeNotifier {
   }
 
   void _log(String message) {
-    final timestamp = DateTime.now().toIso8601String().split('T').last.split('.').first;
+    final timestamp = DateTime.now()
+        .toIso8601String()
+        .split('T')
+        .last
+        .split('.')
+        .first;
     _logs.add("[$timestamp] $message");
     if (_logs.length > 100) _logs.removeAt(0);
     notifyListeners();
@@ -61,9 +71,9 @@ class BleServoService extends ChangeNotifier {
 
   void _startScanning() async {
     if (_isConnected) return;
-    
+
     // Safety: Stop any existing scan and cancel previous subscription
-    await FlutterBluePlus.stopScan(); 
+    await FlutterBluePlus.stopScan();
     await _scanSubscription?.cancel();
     _scanSubscription = null;
 
@@ -73,11 +83,11 @@ class BleServoService extends ChangeNotifier {
 
     try {
       // Check if Bluetooth is supported/on
-      if (await FlutterBluePlus.isSupported == false) { 
+      if (await FlutterBluePlus.isSupported == false) {
         _log("Bluetooth not supported");
         return;
       }
-      
+
       // Listen to scan results
       _scanSubscription = FlutterBluePlus.scanResults.listen((results) {
         for (ScanResult r in results) {
@@ -85,21 +95,20 @@ class BleServoService extends ChangeNotifier {
           // _log("Scanned: ${r.device.platformName}");
 
           // Check for Service UUID OR Name (fallback)
-          if (r.advertisementData.serviceUuids.contains(_serviceUuid) || 
-              r.device.platformName.contains("ESP32") || 
+          if (r.advertisementData.serviceUuids.contains(_serviceUuid) ||
+              r.device.platformName.contains("ESP32") ||
               r.device.platformName.toUpperCase().contains("SERVO")) {
-             
-             _log("Found Target: ${r.device.platformName} (${r.device.remoteId})");
-             _connect(r.device);
-             break; 
+            _log(
+              "Found Target: ${r.device.platformName} (${r.device.remoteId})",
+            );
+            _connect(r.device);
+            break;
           }
         }
       });
 
-      // Start scan - OPEN (no filters) 
-      await FlutterBluePlus.startScan(
-        timeout: const Duration(seconds: 15),
-      );
+      // Start scan - OPEN (no filters)
+      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 15));
     } catch (e) {
       _log("Error starting scan: $e");
       _isScanning = false;
@@ -119,7 +128,7 @@ class BleServoService extends ChangeNotifier {
       _isConnected = state == BluetoothConnectionState.connected;
       _log("Connection state: $state");
       notifyListeners();
-      
+
       if (state == BluetoothConnectionState.disconnected) {
         _cleanupConnection();
         _startScanning(); // Restart scanning on disconnect
@@ -132,7 +141,7 @@ class BleServoService extends ChangeNotifier {
       await _discoverServices();
     } catch (e) {
       _log("Connection error: $e");
-      // _cleanupConnection called by listener on disconnect usually, 
+      // _cleanupConnection called by listener on disconnect usually,
       // but if connect throws, we might need to retry manually or let listener handle it
     }
   }
@@ -140,7 +149,7 @@ class BleServoService extends ChangeNotifier {
   Future<void> _discoverServices() async {
     if (_device == null) return;
     _log("Discovering services...");
-    
+
     try {
       List<BluetoothService> services = await _device!.discoverServices();
       for (var service in services) {
@@ -180,7 +189,7 @@ class BleServoService extends ChangeNotifier {
       });
     }
   }
-  
+
   Future<void> _readPosition() async {
     if (_positionChar != null) {
       var value = await _positionChar!.read();
@@ -255,7 +264,7 @@ class BleServoService extends ChangeNotifier {
     _deltaChar = null;
     _minChar = null;
     _maxChar = null;
-    // Don't nullify _device here immediately if we want to reconnect, 
+    // Don't nullify _device here immediately if we want to reconnect,
     // but typically scanning starts fresh.
   }
 

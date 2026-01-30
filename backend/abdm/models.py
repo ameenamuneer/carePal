@@ -222,3 +222,32 @@ class ABDMSession(models.Model):
     def is_expired(self):
         from django.utils import timezone
         return timezone.now() > self.expires_at
+
+class ABDMSubscription(models.Model):
+    """
+    Represents a subscription for health data (HIU/PHR Lockers).
+    Stores details about what data is being observed.
+    """
+    id = models.CharField(max_length=100, primary_key=True) # subscription_id
+    user = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True)
+    abha_address = models.CharField(max_length=50)
+    
+    # Status
+    status = models.CharField(max_length=20, default='REQUESTED')
+    
+    # Subscription Details
+    categories = models.JSONField(default=list) # List of health info types
+    period_from = models.DateTimeField(null=True, blank=True)
+    period_to = models.DateTimeField(null=True, blank=True)
+    
+    # Metadata
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'abdm_subscriptions'
+        verbose_name = 'ABDM Subscription'
+        verbose_name_plural = 'ABDM Subscriptions'
+    
+    def __str__(self):
+        return f"{self.id} - {self.status}"

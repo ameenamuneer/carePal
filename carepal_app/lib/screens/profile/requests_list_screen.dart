@@ -17,7 +17,7 @@ class _RequestsListScreenState extends State<RequestsListScreen> {
 
   Map<String, dynamic>? _data;
   String _currentStatus = 'requested'; // requested, granted, denied
-  String _currentType = 'all';
+  final String _currentType = 'all';
 
   @override
   void initState() {
@@ -61,7 +61,7 @@ class _RequestsListScreenState extends State<RequestsListScreen> {
               children: [
                 Expanded(
                   child: DropdownButtonFormField<String>(
-                    value: _currentStatus,
+                    initialValue: _currentStatus,
                     decoration: const InputDecoration(labelText: 'Status'),
                     items: const [
                       DropdownMenuItem(

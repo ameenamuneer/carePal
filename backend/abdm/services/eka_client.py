@@ -190,7 +190,7 @@ class EKAClient:
         """
         return self._make_request(
             'POST',
-            '/abdm/na/v1/profile/login/login',
+            '/abdm/na/v1/profile/login',
             data={
                 'txn_id': txn_id,
                 'abha_address': abha_address
@@ -321,10 +321,10 @@ class EKAClient:
             oid=oid
         )
 
-    def initiate_link_care_contexts(self, txn_id: str, patient_data: Dict, care_contexts: list, oid: str = None) -> Dict:
+    def initiate_link_care_contexts(self, txn_id: str, patient_ref_id: str, cc_ref_id: str, oid: str = None) -> Dict:
         """
         Initiate linking for discovered contexts (Part 2)
-        POST /abdm/v1/care-contexts/discover/link/init (Inferred)
+        POST /abdm/v1/care-contexts/discover/link/init
         """
         if self.config.get('mock_mode'):
              return {"txn_id": "mock_txn_link_init_456"}
@@ -334,8 +334,8 @@ class EKAClient:
             '/abdm/v1/care-contexts/discover/link/init',
             data={
                 'txn_id': txn_id,
-                'patient': patient_data,
-                'care_contexts': care_contexts
+                'patient_ref_id': patient_ref_id,
+                'cc_ref_id': cc_ref_id
             },
             oid=oid
         )

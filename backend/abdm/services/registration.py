@@ -264,8 +264,7 @@ class ABHARegistrationService:
         try:
             session = ABDMSession.objects.get(
                 txn_id=txn_id,
-                session_type='login',
-                is_active=True
+                session_type='login'
             )
             
             # Verify OTP with Eka.Care
@@ -341,8 +340,7 @@ class ABHARegistrationService:
         try:
             session = ABDMSession.objects.get(
                 txn_id=txn_id,
-                session_type='login',
-                is_active=True
+                session_type='login'
             )
             
             # Call the login endpoint

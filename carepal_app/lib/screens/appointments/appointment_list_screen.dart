@@ -6,7 +6,7 @@ import '../../models/appointment.dart';
 import 'appointment_booking_screen.dart';
 
 class AppointmentListScreen extends StatefulWidget {
-  const AppointmentListScreen({Key? key}) : super(key: key);
+  const AppointmentListScreen({super.key});
 
   @override
   _AppointmentListScreenState createState() => _AppointmentListScreenState();

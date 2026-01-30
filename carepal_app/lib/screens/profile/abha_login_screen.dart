@@ -4,7 +4,7 @@ import '../../providers/abdm_provider.dart';
 import '../dashboard_screen.dart';
 
 class AbhaLoginScreen extends StatefulWidget {
-  const AbhaLoginScreen({Key? key}) : super(key: key);
+  const AbhaLoginScreen({super.key});
 
   @override
   _AbhaLoginScreenState createState() => _AbhaLoginScreenState();
@@ -217,7 +217,7 @@ class _AbhaLoginScreenState extends State<AbhaLoginScreen> {
                         });
                       },
                     );
-                  }).toList(),
+                  }),
                 const SizedBox(height: 16),
                 ElevatedButton(
                   onPressed: isLoading ? null : _submitAbhaSelection,

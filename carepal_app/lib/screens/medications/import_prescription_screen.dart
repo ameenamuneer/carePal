@@ -3,7 +3,7 @@ import 'package:provider/provider.dart';
 import '../../providers/medication_provider.dart';
 
 class ImportPrescriptionScreen extends StatefulWidget {
-  const ImportPrescriptionScreen({Key? key}) : super(key: key);
+  const ImportPrescriptionScreen({super.key});
 
   @override
   _ImportPrescriptionScreenState createState() =>

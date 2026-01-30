@@ -463,6 +463,16 @@ class DashboardViewSet(viewsets.ViewSet):
                 period_label='last_7days'
             ).order_by('-computed_at').first()
             
+            # Recent history for plotting (last 15 readings)
+            recent_readings = VitalReading.objects.filter(
+                patient_id=patient_id,
+                vital_type=vital_type,
+                is_deleted=False
+            ).order_by('-measured_at')[:15]
+            
+            # Convert to list and reverse to chronological order (oldest -> newest) for plotting
+            recent_history = VitalReadingListSerializer(reversed(recent_readings), many=True).data
+
             summary.append({
                 'vital_type': vital_type.name,
                 'vital_code': vital_type.code,
@@ -471,7 +481,8 @@ class DashboardViewSet(viewsets.ViewSet):
                 'average_today': avg_today,
                 'trend_7days': VitalTrendAnalysisSerializer(trend_7days).data if trend_7days else None,
                 'has_anomalies': anomaly_count > 0,
-                'anomaly_count_today': anomaly_count
+                'anomaly_count_today': anomaly_count,
+                'recent_history': recent_history  # New field for sparklines
             })
         
         return Response(summary)

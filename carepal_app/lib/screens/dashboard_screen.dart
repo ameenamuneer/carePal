@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
-import 'package:intl/intl.dart';
 import '../core/app_colors.dart';
 import '../providers/auth_provider.dart';
 import '../providers/vitals_provider.dart';
@@ -13,6 +12,7 @@ import '../widgets/carepal_logo.dart';
 import '../widgets/loading_shimmer.dart';
 import '../widgets/error_view.dart';
 import '../widgets/quick_vital_entry.dart';
+import 'package:fl_chart/fl_chart.dart';
 
 import 'package:permission_handler/permission_handler.dart';
 
@@ -356,65 +356,31 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Widget _buildVitalsGridFromProvider() {
     return Consumer<VitalsProvider>(
       builder: (context, provider, _) {
-        // FIXED: Check dashboard state instead of history list
-        if (provider.isLoading && provider.dashboardVitals.isEmpty) {
+        if (provider.isLoading && provider.dashboardSummaries.isEmpty) {
           return _buildVitalsLoadingGrid();
         }
 
-        // Group readings by vital type
-        final vitalsByType = <String, Map<String, dynamic>>{};
-
-        // FIXED: Use dashboardVitals source
-        for (final reading in provider.dashboardVitals) {
-          // Find the vital type by CODE first, then by ID
-          final vitalType = provider.vitalTypes.firstWhere(
-            (vt) =>
-                vt.code.toUpperCase() == reading.vitalCode.toUpperCase() ||
-                vt.id == reading.vitalTypeId,
-            orElse: () =>
-                VitalType(id: -1, name: '', code: '', unit: '', category: ''),
-          );
-
-          if (vitalType.id == -1) continue;
-
-          // Normalize the key to match UI constants (HR, BP, TEMP, SPO2)
-          String key = vitalType.code.toUpperCase();
-
-          // Fuzzy match names if codes vary
-          if (vitalType.name.toLowerCase().contains('blood pressure'))
-            key = 'BP';
-          else if (vitalType.name.toLowerCase().contains('heart rate'))
-            key = 'HR';
-          else if (vitalType.name.toLowerCase().contains('temperature'))
-            key = 'TEMP';
-          else if (vitalType.name.toLowerCase().contains('oxygen'))
-            key = 'SPO2';
-
-          // Store first found reading (latest)
-          if (!vitalsByType.containsKey(key)) {
-            vitalsByType[key] = {'reading': reading, 'type': vitalType};
-          }
-        }
+        final summaries = provider.dashboardSummaries;
 
         return Column(
           children: [
             Row(
               children: [
                 Expanded(
-                  child: _buildVitalCardFromReading(
+                  child: _buildVitalCardFromSummary(
                     'HR',
                     'Heart Rate',
-                    vitalsByType['HR'],
+                    summaries['HR'],
                     Icons.favorite,
                     AppColors.vitalsRed,
                   ),
                 ),
                 const SizedBox(width: 16),
                 Expanded(
-                  child: _buildVitalCardFromReading(
+                  child: _buildVitalCardFromSummary(
                     'BP',
                     'Blood Pressure',
-                    vitalsByType['BP'],
+                    summaries['BP'],
                     Icons.monitor_heart,
                     AppColors.vitalsBlue,
                   ),
@@ -425,20 +391,20 @@ class _DashboardScreenState extends State<DashboardScreen> {
             Row(
               children: [
                 Expanded(
-                  child: _buildVitalCardFromReading(
+                  child: _buildVitalCardFromSummary(
                     'TEMP',
                     'Temperature',
-                    vitalsByType['TEMP'],
+                    summaries['TEMP'],
                     Icons.thermostat,
                     AppColors.vitalsOrange,
                   ),
                 ),
                 const SizedBox(width: 16),
                 Expanded(
-                  child: _buildVitalCardFromReading(
+                  child: _buildVitalCardFromSummary(
                     'SPO2',
                     'Oxygen',
-                    vitalsByType['SPO2'],
+                    summaries['SPO2'],
                     Icons.air,
                     AppColors.vitalsBlue,
                   ),
@@ -451,26 +417,31 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  Widget _buildVitalCardFromReading(
+  Widget _buildVitalCardFromSummary(
     String code,
     String name,
-    Map<String, dynamic>? vitalData,
+    Map<String, dynamic>? summary,
     IconData icon,
     Color color,
   ) {
     String value = '--';
     String status = 'Normal';
     Color statusColor = AppColors.success;
+    List<dynamic> history = [];
 
-    if (vitalData != null) {
-      final reading = vitalData['reading'];
-      value = reading.displayValue.split(' ')[0];
-
-      status = reading.anomalySeverity == 'NORMAL' ? 'Normal' : 'Alert';
-      statusColor = reading.anomalySeverity == 'NORMAL'
-          ? AppColors.success
-          : AppColors.error;
+    if (summary != null) {
+      if (summary['latest_reading'] != null) {
+        final reading = VitalReading.fromJson(summary['latest_reading']);
+        value = reading.displayValue.split(' ')[0];
+        status = reading.anomalySeverity == 'NORMAL' ? 'Normal' : 'Alert';
+        statusColor = reading.anomalySeverity == 'NORMAL'
+            ? AppColors.success
+            : AppColors.error;
+      }
+      history = summary['recent_history'] ?? [];
     }
+
+    // ... continue to card ...
 
     return GestureDetector(
       onTap: () {
@@ -528,7 +499,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 ),
               ],
             ),
-            const Spacer(),
+            _buildSparkline(history, color),
             Text(
               value,
               style: GoogleFonts.lexend(
@@ -723,6 +694,83 @@ class _DashboardScreenState extends State<DashboardScreen> {
               size: 16,
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSparkline(List<dynamic> history, Color color) {
+    if (history.length < 2) return const Spacer();
+
+    // Parse data points
+    List<FlSpot> spots = [];
+    double minY = double.infinity;
+    double maxY = double.negativeInfinity;
+
+    for (int i = 0; i < history.length; i++) {
+      try {
+        final r = history[i];
+        // history is oldest->newest
+
+        double val = 0;
+        if (r['value'] != null) {
+          val = (r['value'] as num).toDouble();
+        } else if (r['values'] != null) {
+          final values = r['values'] as Map<String, dynamic>;
+          if (values.containsKey('systolic')) {
+            val = (values['systolic'] as num).toDouble();
+          } else if (values.values.isNotEmpty) {
+            val = (values.values.first as num).toDouble();
+          }
+        }
+
+        spots.add(FlSpot(i.toDouble(), val));
+        if (val < minY) minY = val;
+        if (val > maxY) maxY = val;
+      } catch (e) {
+        // Skip invalid
+      }
+    }
+
+    if (spots.isEmpty) return const Spacer();
+
+    // Add padding to Y range
+    final range = maxY - minY;
+    if (range == 0) {
+      minY -= 5;
+      maxY += 5;
+    } else {
+      minY -= range * 0.2;
+      maxY += range * 0.2;
+    }
+
+    return Expanded(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8.0),
+        child: LineChart(
+          LineChartData(
+            gridData: FlGridData(show: false),
+            titlesData: FlTitlesData(show: false),
+            borderData: FlBorderData(show: false),
+            minX: 0,
+            maxX: (history.length - 1).toDouble(),
+            minY: minY,
+            maxY: maxY,
+            lineBarsData: [
+              LineChartBarData(
+                spots: spots,
+                isCurved: true,
+                color: color,
+                barWidth: 2,
+                isStrokeCapRound: true,
+                dotData: FlDotData(show: false),
+                belowBarData: BarAreaData(
+                  show: true,
+                  color: color.withOpacity(0.1),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
