@@ -53,6 +53,9 @@ INSTALLED_APPS = [
     'agent',
     'analytics',
     'family',
+    'appointments',
+    'abdm',
+    'fhir_integration',
 ]
 
 MIDDLEWARE = [
