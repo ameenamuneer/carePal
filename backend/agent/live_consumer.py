@@ -67,6 +67,7 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                 return {
                     "name": self.user.get_full_name() or self.user.username,
                     "age": "Unknown",
+                    "gender": "Unknown",
                     "vitals": "None",
                     "medications": "None"
                 }
@@ -110,6 +111,7 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
             return {
                 "name": "Patient", 
                 "age": "Unknown",
+                "gender": "Unknown",
                 "vitals": "Error fetching", 
                 "medications": "Error fetching"
             }
