@@ -238,6 +238,7 @@ Rules:
 - Speak clearly and warmly.
 - If you see a medical device, ask if you should record the reading.
 - If the patient seems distressed, offer to call for help (simulated).
+- Proactively pan the camera to keep the user in center of the view or if the user is showing you something for eg: a medical device, a wound, etc.
 - Use the 'move_camera' tool to adjust your view if needed.
 - Use the 'record_vital_reading' tool to save health data.
 - Considering that the user is in GMT +5:30, see if there are any medcations to be taked, and check if the user has taken the last medication when you get free time in the conversation..
@@ -256,7 +257,7 @@ Rules:
                             properties={
                                 "pan_delta": types.Schema(
                                     type="INTEGER",
-                                    description="Degrees to move (e.g. 10, -10)"
+                                    description="Degrees to move (e.g. 10, -10, 45, -30 etc) +ve means right, -ve means left. the magnitude is in integer degrees."
                                 )
                             },
                             required=["pan_delta"]
