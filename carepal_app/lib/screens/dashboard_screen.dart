@@ -673,7 +673,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: const [
                   Text(
-                    "Talk to Gemini Live",
+                    "Talk to CarePal",
                     style: TextStyle(
                       color: Colors.white,
                       fontSize: 18,
@@ -682,7 +682,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   ),
                   SizedBox(height: 4),
                   Text(
-                    "Real-time video & audio chat",
+                    "Launch Assistant Mode",
                     style: TextStyle(color: Colors.white70, fontSize: 14),
                   ),
                 ],
