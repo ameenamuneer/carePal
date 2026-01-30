@@ -55,6 +55,7 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                 return {
                     "name": "Guest",
                     "age": "Unknown",
+                    "gender": "Unknown",
                     "vitals": "No recent records",
                     "medications": "Unknown"
                 }
