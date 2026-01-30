@@ -243,52 +243,52 @@ Rules:
 """
 
         # 3. Define Tools
-        # Google GenAI SDK v1Beta/v2 format for tool definitions
+        # Google GenAI SDK v1Beta/v2 format for tool definitions using types
         tools = [
-            {
-                "function_declarations": [
-                    {
-                        "name": "move_camera",
-                        "description": "Move the camera horizontally (pan). Use positive values for right, negative for left.",
-                        "parameters": {
-                            "type": "OBJECT",
-                            "properties": {
-                                "pan_delta": {
-                                    "type": "INTEGER",
-                                    "description": "Degrees to move (e.g. 10, -10)"
-                                }
+            types.Tool(
+                function_declarations=[
+                    types.FunctionDeclaration(
+                        name="move_camera",
+                        description="Move the camera horizontally (pan). Use positive values for right, negative for left.",
+                        parameters=types.Schema(
+                            type="OBJECT",
+                            properties={
+                                "pan_delta": types.Schema(
+                                    type="INTEGER",
+                                    description="Degrees to move (e.g. 10, -10)"
+                                )
                             },
-                            "required": ["pan_delta"]
-                        }
-                    },
-                    {
-                        "name": "record_vital_reading",
-                        "description": "Record a patient's vital sign reading into the database.",
-                        "parameters": {
-                            "type": "OBJECT",
-                            "properties": {
-                                "vital_type": {
-                                    "type": "STRING",
-                                    "description": "Type of vital (e.g., 'Blood Pressure', 'Heart Rate', 'SpO2', 'Glucose', 'Temperature', 'Weight')"
-                                },
-                                "value": {
-                                    "type": "NUMBER",
-                                    "description": "Single value reading (for HR, SpO2, Temp, etc.)"
-                                },
-                                "systolic": {
-                                    "type": "NUMBER",
-                                    "description": "Systolic Blood Pressure"
-                                },
-                                "diastolic": {
-                                    "type": "NUMBER",
-                                    "description": "Diastolic Blood Pressure"
-                                }
+                            required=["pan_delta"]
+                        )
+                    ),
+                    types.FunctionDeclaration(
+                        name="record_vital_reading",
+                        description="Record a patient's vital sign reading into the database.",
+                        parameters=types.Schema(
+                            type="OBJECT",
+                            properties={
+                                "vital_type": types.Schema(
+                                    type="STRING",
+                                    description="Type of vital (e.g., 'Blood Pressure', 'Heart Rate', 'SpO2', 'Glucose', 'Temperature', 'Weight')"
+                                ),
+                                "value": types.Schema(
+                                    type="NUMBER",
+                                    description="Single value reading (for HR, SpO2, Temp, etc.)"
+                                ),
+                                "systolic": types.Schema(
+                                    type="NUMBER",
+                                    description="Systolic Blood Pressure"
+                                ),
+                                "diastolic": types.Schema(
+                                    type="NUMBER",
+                                    description="Diastolic Blood Pressure"
+                                )
                             },
-                            "required": ["vital_type"]
-                        }
-                    }
+                            required=["vital_type"]
+                        )
+                    )
                 ]
-            }
+            )
         ]
 
         client = genai.Client(
