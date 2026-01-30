@@ -183,6 +183,7 @@ CORS_ALLOW_ALL_ORIGINS = True  # For development only
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "http://13.50.110.215:3000",
 ]
 
 CORS_ALLOW_CREDENTIALS = True
