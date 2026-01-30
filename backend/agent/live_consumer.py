@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 # Configure the model
 # Configure the model
-MODEL = "models/gemini-2.0-flash-exp" # Updated to Flash 2.0 Exp as per service
+MODEL = "models/gemini-2.5-flash-native-audio-preview-12-2025"
 
 class GeminiLiveConsumer(AsyncWebsocketConsumer):
     async def connect(self):
