@@ -280,6 +280,11 @@ LOGGING = {
             'level': 'DEBUG',
             'propagate': False,
         },
+        'vitals': {
+            'handlers': ['console'],
+            'level': 'DEBUG',
+            'propagate': False,
+        },
     },
 }
 

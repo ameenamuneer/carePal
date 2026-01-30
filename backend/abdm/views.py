@@ -179,7 +179,7 @@ def verify_login_view(request):
         return Response({'error': str(e)}, status=400)
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def complete_login_view(request):
     """
     POST /api/v1/abdm/login/

@@ -24,8 +24,8 @@ def get_vitals_as_fhir(request, vitals_id):
             'name': f"{patient.user.first_name} {patient.user.last_name}",
             'gender': patient.gender.lower() if patient.gender else 'unknown',
             'birth_date': getattr(patient, 'date_of_birth', None).strftime('%Y-%m-%d') if getattr(patient, 'date_of_birth', None) else None,
-            'phone': patient.user.mobile_number if hasattr(patient.user, 'mobile_number') else getattr(patient, 'mobile_number', '1234567890'), # Try both
-            'abha_id': patient.abha_address or patient.abha_number
+            'phone': patient.user.mobile_number if hasattr(patient.user, 'mobile_number') else getattr(patient, 'mobile_number', '1234567890'),
+            'abha_id': patient.abha_address or patient.abha_number or (patient.abha_profile.abha_address if hasattr(patient, 'abha_profile') else None)
         }
 
         # 2. Map Vitals Data (Reading -> Dictionary)

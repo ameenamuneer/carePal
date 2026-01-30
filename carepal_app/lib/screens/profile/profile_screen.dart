@@ -12,6 +12,8 @@ import 'family_members_screen.dart';
 import 'notifications_settings_screen.dart';
 import 'language_settings_screen.dart';
 import 'abha_registration_screen.dart';
+import 'phr_onboarding_screen.dart';
+import 'requests_list_screen.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -111,6 +113,32 @@ class _ProfileScreenState extends State<ProfileScreen> {
                           context,
                           MaterialPageRoute(
                             builder: (_) => const AbhaRegistrationScreen(),
+                          ),
+                        );
+                      },
+                    ),
+                    _ProfileItem(
+                      icon: Icons.link,
+                      title: 'Connect Health Records',
+                      subtitle: 'Discover & Link Hospital Records',
+                      onTap: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => const PhrOnboardingScreen(),
+                          ),
+                        );
+                      },
+                    ),
+                    _ProfileItem(
+                      icon: Icons.approval,
+                      title: 'Requests & Consents',
+                      subtitle: 'Approve or Deny Access',
+                      onTap: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => const RequestsListScreen(),
                           ),
                         );
                       },

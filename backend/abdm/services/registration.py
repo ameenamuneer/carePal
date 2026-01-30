@@ -191,7 +191,7 @@ class ABHARegistrationService:
             abha_profile = ABHAProfile.objects.create(
                 patient=patient,
                 abha_address=f"{abha_address}@abdm",
-                abha_number=profile.get('abha_number'),
+                abha_number=profile.get('abha_number') or None,
                 full_name=f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip(),
                 date_of_birth=user.date_of_birth,
                 gender=profile.get('gender'),
@@ -284,6 +284,10 @@ class ABHARegistrationService:
                 try:
                     mobile = session.mobile
                     patient = PatientProfile.objects.filter(user__phone_number=mobile).first()
+                    # Try without +91 if not found
+                    if not patient and mobile.startswith('+91'):
+                        raw_mobile = mobile[3:]
+                        patient = PatientProfile.objects.filter(user__phone_number=raw_mobile).first()
                 except Exception:
                     logger.warning(f"Could not find patient for mobile {session.mobile}")
             
@@ -304,7 +308,7 @@ class ABHARegistrationService:
                         patient=patient,
                         abha_address=profile.get('abha_address'),
                         defaults={
-                            'abha_number': profile.get('abha_number'),
+                            'abha_number': profile.get('abha_number') or None,
                             'full_name': f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip(),
                             'gender': profile.get('gender'),
                             'mobile': session.mobile,
@@ -357,6 +361,10 @@ class ABHARegistrationService:
                 try:
                     mobile = session.mobile
                     patient = PatientProfile.objects.filter(user__phone_number=mobile).first()
+                     # Try without +91 if not found
+                    if not patient and mobile.startswith('+91'):
+                        raw_mobile = mobile[3:]
+                        patient = PatientProfile.objects.filter(user__phone_number=raw_mobile).first()
                 except Exception:
                     pass
             
@@ -367,7 +375,7 @@ class ABHARegistrationService:
                     abha_address=abha_address,
 
                     defaults={
-                        'abha_number': profile.get('abha_number'),
+                        'abha_number': profile.get('abha_number') or None,
                         'full_name': f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip(),
                         'gender': profile.get('gender'),
                         'mobile': session.mobile,
