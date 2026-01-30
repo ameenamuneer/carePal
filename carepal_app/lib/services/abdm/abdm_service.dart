@@ -107,6 +107,9 @@ class AbdmService {
     String abhaAddress,
   ) async {
     try {
+      print(
+        'DEBUG: Calling completeLogin with path: $_basePath/login/complete/',
+      );
       final response = await _api.post(
         '$_basePath/login/complete/',
         data: {'txn_id': txnId, 'abha_address': abhaAddress},

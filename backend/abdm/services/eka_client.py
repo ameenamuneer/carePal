@@ -190,10 +190,10 @@ class EKAClient:
         """
         return self._make_request(
             'POST',
-            '/abdm/na/v1/profile/login',
+            '/abdm/na/v1/profile/login/phr',
             data={
                 'txn_id': txn_id,
-                'abha_address': abha_address
+                'phr_address': abha_address  # API expects phr_address
             }
         )
 
