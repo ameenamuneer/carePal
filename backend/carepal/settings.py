@@ -26,7 +26,7 @@ SECRET_KEY = 'django-insecure-#7c7m&8l2kaa5wr6v2e*h_t@y4e8d2*91s4(%lqri*tk^%o8ie
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['testserver', 'localhost', '127.0.0.1']
+ALLOWED_HOSTS = ['testserver', 'localhost', '127.0.0.1', '*']
 
 
 # Application definition
@@ -53,8 +53,6 @@ INSTALLED_APPS = [
     'agent',
     'analytics',
     'family',
-    'appointments',
-    'abdm',
 ]
 
 MIDDLEWARE = [
@@ -166,10 +164,8 @@ SIMPLE_JWT = {
 }
 
 # Celery Configuration
-# Celery Configuration
-# Celery Configuration
-CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0')
-CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', 'redis://localhost:6379/0')
+CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', 'redis://redis:6379/0')
+CELERY_RESULT_BACKEND = os.environ.get('CELERY_RESULT_BACKEND', 'redis://redis:6379/0')
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
