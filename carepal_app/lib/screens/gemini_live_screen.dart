@@ -12,9 +12,14 @@ import 'package:flutter_pcm_sound/flutter_pcm_sound.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:image/image.dart' as img;
 import '../services/api_service.dart';
+import '../services/ble_servo_service.dart'; // Import BLE Service
+
+
+import 'package:provider/provider.dart'; // Add Provider
 
 class GeminiLiveScreen extends StatefulWidget {
-  const GeminiLiveScreen({super.key});
+
+  const GeminiLiveScreen({Key? key}) : super(key: key);
 
   @override
   State<GeminiLiveScreen> createState() => _GeminiLiveScreenState();
@@ -23,7 +28,9 @@ class GeminiLiveScreen extends StatefulWidget {
 class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
   CameraController? _cameraController;
   final AudioRecorder _audioRecorder = AudioRecorder();
+  final BleServoService _bleServoService = BleServoService(); // Initialize Service
 
+  
   WebSocketChannel? _channel;
 
   bool _isConnecting = true;
@@ -196,8 +203,16 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
             FlutterPcmSound.feed(PcmArrayInt16.fromList(int16List));
           }
         } else if (type == 'text') {
-          print("Gemini: ${data['content']}");
+           print("Gemini: ${data['content']}");
+        } else if (type == 'camera_control') {
+           // Handle Camera Control Tool
+           final panDelta = data['pan_delta'];
+           if (panDelta != null) {
+              print("Moving Camera Pan Delta: $panDelta");
+              _bleServoService.setDelta(panDelta.toString());
+           }
         }
+
       } catch (e) {
         print("Error parsing message: $e");
       }
@@ -296,40 +311,48 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
             const Center(child: CircularProgressIndicator(color: Colors.white)),
 
           Positioned(
-            bottom: 40,
-            left: 0,
-            right: 0,
-            child: Center(
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 24,
-                  vertical: 12,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.6),
-                  borderRadius: BorderRadius.circular(30),
-                  border: Border.all(color: Colors.white24),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      _isConnected ? Icons.circle : Icons.error_outline,
-                      color: _isConnected
-                          ? Colors.greenAccent
-                          : Colors.redAccent,
-                      size: 16,
-                    ),
-                    const SizedBox(width: 12),
-                    Text(
-                      _isConnected ? "Gemini Live Connected" : "Connecting...",
-                      style: const TextStyle(color: Colors.white),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
+             bottom: 40, 
+             left: 0, 
+             right: 0,
+             child: Center(
+               child: Container(
+                 padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                 decoration: BoxDecoration(
+                   color: Colors.black.withOpacity(0.6),
+                   borderRadius: BorderRadius.circular(30),
+                   border: Border.all(color: Colors.white24)
+                 ),
+                 child: Row(
+                   mainAxisSize: MainAxisSize.min,
+                   children: [
+                     Icon(
+                       _isConnected ? Icons.circle : Icons.error_outline, 
+                       color: _isConnected ? Colors.greenAccent : Colors.redAccent,
+                       size: 16,
+                     ),
+                     const SizedBox(width: 8),
+                     Consumer<BleServoService>( // Show BLE Status
+                       builder: (context, ble, child) {
+                          return Icon(
+                              ble.isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
+                              color: ble.isConnected ? Colors.blueAccent : Colors.grey,
+                              size: 16,
+                          );
+                       }
+                     ),
+                     const SizedBox(width: 12),
+
+                     Text(
+                       _isConnected ? "Gemini Live Connected" : "Connecting...",
+                       style: const TextStyle(
+                         color: Colors.white, 
+                       ),
+                     ),
+                   ],
+                 ),
+               ),
+             )
+          )
         ],
       ),
     );
