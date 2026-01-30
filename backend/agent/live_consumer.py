@@ -257,7 +257,7 @@ Rules:
                             properties={
                                 "pan_delta": types.Schema(
                                     type="INTEGER",
-                                    description="Degrees to move (e.g. 10, -10, 45, -30 etc) +ve means right, -ve means left. the magnitude is in integer degrees."
+                                    description="Degrees to move (e.g. 10, -10, 45, -30 etc) negative means right, positive means left. the magnitude is in integer degrees."
                                 )
                             },
                             required=["pan_delta"]
