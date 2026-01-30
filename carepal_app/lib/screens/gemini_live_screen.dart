@@ -157,6 +157,12 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
     // CarePal likely runs backend on 8000.
     wsUrl = '$wsUrl/ws/agent/live/';
 
+    // Add Auth Token
+    final token = await ApiService().getAccessToken();
+    if (token != null) {
+      wsUrl = '$wsUrl?token=$token';
+    }
+
     print("Connecting to $wsUrl");
 
     try {

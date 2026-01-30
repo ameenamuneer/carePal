@@ -4,6 +4,7 @@ from django.core.asgi import get_asgi_application
 from channels.routing import ProtocolTypeRouter, URLRouter
 from channels.auth import AuthMiddlewareStack
 import agent.routing
+from carepal.middleware import QueryAuthMiddleware
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'carepal.settings')
 django.setup()
@@ -11,8 +12,10 @@ django.setup()
 application = ProtocolTypeRouter({
     "http": get_asgi_application(),
     "websocket": AuthMiddlewareStack(
-        URLRouter(
-            agent.routing.websocket_urlpatterns
+        QueryAuthMiddleware(
+            URLRouter(
+                agent.routing.websocket_urlpatterns
+            )
         )
     ),
 })
