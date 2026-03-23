@@ -6,6 +6,7 @@ WORKDIR /app
 
 # Copy the dependency files first to cache dependencies
 COPY pubspec.yaml pubspec.lock ./
+COPY plugins/ plugins/
 
 # Get dependencies
 RUN flutter pub get

@@ -51,7 +51,8 @@ dependencies:
   permission_handler: ^11.3.0
   camera: ^0.10.5
   record: ^5.2.0
-  flutter_pcm_sound: ^3.3.3
+  flutter_pcm_sound:
+    path: plugins/flutter_pcm_sound
   image: ^4.1.7
   audio_session: ^0.1.21
 
