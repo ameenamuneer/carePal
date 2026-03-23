@@ -28,13 +28,13 @@ class GeminiLiveScreen extends StatefulWidget {
 class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
   CameraController? _cameraController;
   final AudioRecorder _audioRecorder = AudioRecorder();
-  final BleServoService _bleServoService = BleServoService(); // Initialize Service
+  final BleServoService _bleServoService = BleServoService();
 
-  
   WebSocketChannel? _channel;
 
   bool _isConnecting = true;
   bool _isConnected = false;
+  bool _isDisposed = false; // Guard to prevent any sends after dispose
 
   static const int _sampleRate = 16000;
 
@@ -129,14 +129,15 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
 
         _audioSubscription = stream.listen(
           (data) {
+            // CRITICAL: Drop this chunk if not connected or disposed.
+            // This prevents a massive audio backlog building up in Dart's
+            // event queue when the WebSocket is slow or closed.
+            if (!_isConnected || _isDisposed) return;
             _sendAudio(data);
           },
-          onError: (e) {
-            print("Audio Stream Error: $e");
-          },
-          onDone: () {
-            print("Audio Stream Done (Closed by OS/User)");
-          },
+          onError: (e) => print("Audio Stream Error: $e"),
+          onDone: () => print("Audio Stream Closed"),
+          cancelOnError: false,
         );
       }
 
@@ -167,10 +168,14 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
 
     try {
       _channel = IOWebSocketChannel.connect(Uri.parse(wsUrl));
+      // Set connected immediately after socket opens — do NOT wait for first message.
+      // Audio sending is gated on this flag, so setting it here prevents a
+      // deadlock where the server waits for audio and the client waits for the server.
+      _isConnected = true;
+      if (mounted) setState(() {});
 
       _channel!.stream.listen(
         (message) {
-          _isConnected = true;
           _handleMessage(message);
           if (mounted) setState(() {});
         },
@@ -198,7 +203,10 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
         
         if (typeByte == 0x00) {
           // Audio
-          final audioBytes = message.sublist(1);
+          var audioBytes = message.sublist(1);
+          if (audioBytes.length % 2 != 0) {
+            audioBytes = audioBytes.sublist(0, audioBytes.length - 1);
+          }
           final int16List = audioBytes.buffer.asInt16List(audioBytes.offsetInBytes, audioBytes.lengthInBytes ~/ 2);
           FlutterPcmSound.feed(PcmArrayInt16.fromList(int16List));
         } else if (typeByte == 0x02) {
@@ -234,8 +242,11 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
         if (type == 'audio') {
           final audioBase64 = data['data'];
           if (audioBase64 != null) {
-            final audioBytes = base64Decode(audioBase64);
-            final int16List = audioBytes.buffer.asInt16List();
+            var audioBytes = base64Decode(audioBase64);
+            if (audioBytes.length % 2 != 0) {
+              audioBytes = audioBytes.sublist(0, audioBytes.length - 1);
+            }
+            final int16List = audioBytes.buffer.asInt16List(audioBytes.offsetInBytes, audioBytes.lengthInBytes ~/ 2);
             FlutterPcmSound.feed(PcmArrayInt16.fromList(int16List));
           }
         } else if (type == 'text') {
@@ -255,30 +266,28 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
   }
 
   void _interruptAudio() {
-    try {
-      // Attempt to stop PCM sound and recreate to clear buffers
-      FlutterPcmSound.stop().then((_) {
-          FlutterPcmSound.setup(sampleRate: 24000, channelCount: 1);
-      }).catchError((e){ print("Error recovering audio setup: $e"); });
-    } catch(e) {
+    // In flutter_pcm_sound v3.x, the only way to flush the buffer is to
+    // release the engine and reinitialize it. No stop() or clear() exists.
+    FlutterPcmSound.release().then((_) {
+      FlutterPcmSound.setup(sampleRate: 24000, channelCount: 1);
+      print("Audio engine reset on interrupt.");
+    }).catchError((e) {
       print("Failed to interrupt audio: $e");
-    }
+    });
   }
 
   void _sendAudio(Uint8List data) {
-    if (_channel == null) return;
+    if (_channel == null || !_isConnected || _isDisposed) return;
+    if (data.isEmpty) return;
 
     try {
-      // Removed energy calculation and logging to reduce overhead
-      if (data.isEmpty) return;
-
       final payload = Uint8List(data.length + 1);
       payload[0] = 0x00;
       payload.setRange(1, payload.length, data);
-      
       _channel!.sink.add(payload);
     } catch (e) {
       print("Send Audio Error: $e");
+      _isConnected = false;
     }
   }
 
@@ -324,10 +333,25 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
 
   @override
   void dispose() {
+    _isDisposed = true;
+    _isConnected = false;
+
+    // Cancel the stream subscription first so no more audio chunks arrive
     _audioSubscription?.cancel();
-    //FlutterPcmSound.stop(); // Removed as it causes error
+
+    // Stop the microphone recorder so the OS releases the audio input
+    _audioRecorder.stop().catchError((e) => print("Recorder stop error: $e"));
+
+    // Release the PCM audio player
+    FlutterPcmSound.release().catchError((e) => print("PCM release error: $e"));
+
+    // Stop camera stream
+    _cameraController?.stopImageStream();
     _cameraController?.dispose();
-    _channel?.sink.close();
+
+    // Close the WebSocket with a clean 1000 Normal Closure code
+    _channel?.sink.close(1000, 'Screen disposed');
+
     super.dispose();
   }
 
