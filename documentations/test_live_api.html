@@ -1,33 +1,143 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CarePAL Live AI API Tester</title>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background-color: #f5f7fa; color: #333; }
-        h1 { color: #2c3e50; }
-        .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px; }
-        .form-group { margin-bottom: 15px; }
-        label { display: block; font-weight: bold; margin-bottom: 5px; }
-        input[type="text"] { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
-        button { background: #3498db; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; font-size: 14px; margin-right: 10px; margin-bottom: 10px; }
-        button:hover { background: #2980b9; }
-        button:disabled { background: #95a5a6; cursor: not-allowed; }
-        button.danger { background: #e74c3c; }
-        button.danger:hover { background: #c0392b; }
-        .media-container { display: flex; gap: 20px; margin-bottom: 20px; }
-        .video-box { flex: 1; background: #000; border-radius: 8px; overflow: hidden; display: flex; align-items: center; justify-content: center; min-height: 200px; }
-        video { width: 100%; height: auto; display: block; }
-        #logs { background: #2c3e50; color: #ecf0f1; padding: 15px; border-radius: 8px; height: 300px; overflow-y: auto; font-family: monospace; white-space: pre-wrap; font-size: 13px; }
-        .log-entry { margin-bottom: 5px; border-bottom: 1px solid #34495e; padding-bottom: 5px; }
-        .log-in { color: #2ecc71; }
-        .log-out { color: #3498db; }
-        .log-error { color: #e74c3c; }
-        .log-sys { color: #f1c40f; }
-        .controls { display: flex; flex-wrap: wrap; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f7fa;
+            color: #333;
+        }
+
+        h1 {
+            color: #2c3e50;
+        }
+
+        .card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            margin-bottom: 20px;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        input[type="text"] {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+
+        button {
+            background: #3498db;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+
+        button:hover {
+            background: #2980b9;
+        }
+
+        button:disabled {
+            background: #95a5a6;
+            cursor: not-allowed;
+        }
+
+        button.danger {
+            background: #e74c3c;
+        }
+
+        button.danger:hover {
+            background: #c0392b;
+        }
+
+        .media-container {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .video-box {
+            flex: 1;
+            background: #000;
+            border-radius: 8px;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 200px;
+        }
+
+        video {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        #logs {
+            background: #2c3e50;
+            color: #ecf0f1;
+            padding: 15px;
+            border-radius: 8px;
+            height: 300px;
+            overflow-y: auto;
+            font-family: monospace;
+            white-space: pre-wrap;
+            font-size: 13px;
+        }
+
+        .log-entry {
+            margin-bottom: 5px;
+            border-bottom: 1px solid #34495e;
+            padding-bottom: 5px;
+        }
+
+        .log-in {
+            color: #2ecc71;
+        }
+
+        .log-out {
+            color: #3498db;
+        }
+
+        .log-error {
+            color: #e74c3c;
+        }
+
+        .log-sys {
+            color: #f1c40f;
+        }
+
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+        }
     </style>
 </head>
+
 <body>
 
     <h1>CarePAL Live AI Web Tester</h1>
@@ -103,12 +213,12 @@
         let audioProcessor = null;
         let audioSource = null;
         let frameInterval = null;
-        
+
         // Playback variables
         let playbackContext = null;
         let nextPlayTime = 0;
 
-        function logInfo(msg, type='log-sys') {
+        function logInfo(msg, type = 'log-sys') {
             const entry = document.createElement('div');
             entry.className = `log-entry ${type}`;
             const time = new Date().toLocaleTimeString();
@@ -120,43 +230,63 @@
         // --- WEBSOCKET CONNECTION ---
         btnConnect.addEventListener('click', () => {
             if (ws && ws.readyState === WebSocket.OPEN) return;
-            
+
             let host = elWsUrl.value.trim();
-            if(host.endsWith('/')) host = host.slice(0,-1);
-            
+            if (host.endsWith('/')) host = host.slice(0, -1);
+
             const token = elJwtToken.value.trim();
             const wsUrl = `${host}/ws/agent/live/?token=${encodeURIComponent(token)}`;
-            
+
             logInfo(`Connecting to ${wsUrl}...`);
             ws = new WebSocket(wsUrl);
-            
+            ws.binaryType = "arraybuffer";
+
             ws.onopen = () => {
                 logInfo('WebSocket Connected!', 'log-sys');
                 btnConnect.disabled = true;
                 btnDisconnect.disabled = false;
-                
+
                 // Init playback context on user interaction
-                if(!playbackContext) {
-                    playbackContext = new (window.AudioContext || window.webkitAudioContext)({sampleRate: 24000}); // Gemini uses 24kHz output
+                if (!playbackContext) {
+                    playbackContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 }); // Gemini uses 24kHz output
                 } else if (playbackContext.state === 'suspended') {
                     playbackContext.resume();
                 }
             };
-            
+
             ws.onmessage = (event) => {
                 try {
-                    const data = JSON.parse(event.data);
-                    handleIncomingMessage(data);
+                    if (event.data instanceof ArrayBuffer) {
+                        const buffer = event.data;
+                        const dataView = new DataView(buffer);
+                        const typeByte = dataView.getUint8(0);
+                        const payloadBuffer = buffer.slice(1);
+
+                        if (typeByte === 0x00) {
+                            playBinaryAudio(payloadBuffer);
+                        } else if (typeByte === 0x02) {
+                            const jsonStr = new TextDecoder().decode(payloadBuffer);
+                            const data = JSON.parse(jsonStr);
+                            handleIncomingJson(data);
+                        } else if (typeByte === 0x03) {
+                            handleInterrupt();
+                        } else {
+                            logInfo(`Received unknown binary type: ${typeByte}`, 'log-sys');
+                        }
+                    } else {
+                        const data = JSON.parse(event.data);
+                        handleIncomingJson(data);
+                    }
                 } catch (e) {
                     logInfo(`Error parsing message: ${e.message}`, 'log-error');
                 }
             };
-            
+
             ws.onerror = (error) => {
                 logInfo('WebSocket Error', 'log-error');
                 console.error(error);
             };
-            
+
             ws.onclose = (event) => {
                 logInfo(`WebSocket Closed (Code: ${event.code})`, 'log-error');
                 btnConnect.disabled = false;
@@ -169,12 +299,22 @@
             if (ws) ws.close();
         });
 
-        function handleIncomingMessage(msg) {
+        function handleInterrupt() {
+            logInfo(`--- INTERRUPT SIGNAL RECEIVED ---`, 'log-error');
+            if (playbackContext) {
+                playbackContext.close().then(() => {
+                    playbackContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+                    nextPlayTime = 0;
+                });
+            }
+        }
+
+        function handleIncomingJson(msg) {
             if (msg.error) {
                 logInfo(`Error: ${msg.error}`, 'log-error');
                 return;
             }
-            
+
             switch (msg.type) {
                 case 'text':
                     logInfo(`AI: ${msg.content}`, 'log-in');
@@ -182,40 +322,36 @@
                 case 'camera_control':
                     logInfo(`COMMAND: Adjust camera by pan_delta ${msg.pan_delta} degrees`, 'log-sys');
                     break;
+                case 'interrupted':
+                    handleInterrupt();
+                    break;
                 case 'audio':
-                    playBase64Audio(msg.data);
+                    playBase64Audio(msg.data); // Fallback for old protocol
                     break;
                 default:
                     logInfo(`Received unknown type: ${msg.type}`, 'log-sys');
             }
         }
 
-        // --- AUDIO PLAYBACK (PCM 16-bit to Web Audio) ---
-        function playBase64Audio(base64Str) {
+        function playBinaryAudio(payloadBuffer) {
             if (!playbackContext) return;
-            
-            // Decode base64 to binary string
-            const binaryString = window.atob(base64Str);
-            const bytes = new Uint8Array(binaryString.length);
-            for (let i = 0; i < binaryString.length; i++) {
-                bytes[i] = binaryString.charCodeAt(i);
+            let bufferToUse = payloadBuffer;
+            if (payloadBuffer.byteLength % 2 !== 0) {
+                bufferToUse = payloadBuffer.slice(0, payloadBuffer.byteLength - 1);
             }
-            
-            // Gemini native audio is typically 24kHz 16-bit PCM for output
-            // Read 16-bit PCM into Float32
-            const int16View = new Int16Array(bytes.buffer);
+            const int16View = new Int16Array(bufferToUse);
             const floatArray = new Float32Array(int16View.length);
             for (let i = 0; i < int16View.length; i++) {
-                floatArray[i] = int16View[i] / 32768.0; 
+                floatArray[i] = int16View[i] / 32768.0;
             }
-            
+
             const audioBuffer = playbackContext.createBuffer(1, floatArray.length, 24000);
             audioBuffer.getChannelData(0).set(floatArray);
-            
+
             const source = playbackContext.createBufferSource();
             source.buffer = audioBuffer;
             source.connect(playbackContext.destination);
-            
+
             const currentTime = playbackContext.currentTime;
             if (nextPlayTime < currentTime) {
                 nextPlayTime = currentTime;
@@ -233,7 +369,12 @@
             }
             const text = txtInput.value.trim();
             if (text) {
-                ws.send(JSON.stringify({ type: 'text', data: text }));
+                const jsonStr = JSON.stringify({ type: 'text', data: text });
+                const jsonBytes = new TextEncoder().encode(jsonStr);
+                const payload = new Uint8Array(1 + jsonBytes.length);
+                payload[0] = 0x02;
+                payload.set(jsonBytes, 1);
+                ws.send(payload.buffer);
                 logInfo(`You: ${text}`, 'log-out');
                 txtInput.value = '';
             }
@@ -271,39 +412,31 @@
             try {
                 audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-                
+
                 audioSource = audioContext.createMediaStreamSource(audioStream);
                 // ScriptProcessor is deprecated but easiest for vanilla JS raw PCM access without extra files
                 audioProcessor = audioContext.createScriptProcessor(4096, 1, 1);
-                
+
                 audioProcessor.onaudioprocess = (e) => {
                     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-                    
+
                     const inputData = e.inputBuffer.getChannelData(0);
                     // Convert Float32 to Int16
                     const pcm16 = new Int16Array(inputData.length);
                     for (let i = 0; i < inputData.length; i++) {
                         pcm16[i] = Math.max(-1, Math.min(1, inputData[i])) * 32767;
                     }
-                    
-                    // Base64 encode the Int16Array buffer
+
                     const uint8 = new Uint8Array(pcm16.buffer);
-                    let binary = '';
-                    for (let i = 0; i < uint8.byteLength; i++) {
-                        binary += String.fromCharCode(uint8[i]);
-                    }
-                    const base64Str = window.btoa(binary);
-                    
-                    ws.send(JSON.stringify({
-                        type: 'audio',
-                        mime_type: 'audio/pcm;rate=16000',
-                        data: base64Str
-                    }));
+                    const payload = new Uint8Array(1 + uint8.length);
+                    payload[0] = 0x00;
+                    payload.set(uint8, 1);
+                    ws.send(payload.buffer);
                 };
-                
+
                 audioSource.connect(audioProcessor);
                 audioProcessor.connect(audioContext.destination);
-                
+
                 logInfo('Microphone started.', 'log-sys');
                 btnStartMic.disabled = true;
                 btnStopMic.disabled = false;
@@ -342,17 +475,17 @@
             try {
                 videoStream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
                 elVideo.srcObject = videoStream;
-                
+
                 // Wait for video metadata to set canvas size
                 elVideo.onloadedmetadata = () => {
                     elCanvas.width = elVideo.videoWidth;
                     elCanvas.height = elVideo.videoHeight;
-                    
+
                     // Capture frames at 1 frame per second
                     frameInterval = setInterval(captureAndSendFrame, 1000);
                     logInfo('Camera started (1fps streaming).', 'log-sys');
                 };
-                
+
                 btnStartCamera.disabled = true;
                 btnStopCamera.disabled = false;
             } catch (err) {
@@ -380,19 +513,21 @@
         function captureAndSendFrame() {
             if (!ws || ws.readyState !== WebSocket.OPEN) return;
             if (!elVideo.videoWidth) return;
-            
+
             // Draw video to canvas
             ctxCanvas.drawImage(elVideo, 0, 0, elCanvas.width, elCanvas.height);
-            // Get JPEG base64
-            const dataUrl = elCanvas.toDataURL('image/jpeg', 0.8);
-            // Remove 'data:image/jpeg;base64,'
-            const base64Str = dataUrl.split(',')[1];
-            
-            ws.send(JSON.stringify({
-                type: 'image',
-                mime_type: 'image/jpeg',
-                data: base64Str
-            }));
+
+            elCanvas.toBlob((blob) => {
+                if (blob) {
+                    blob.arrayBuffer().then((ab) => {
+                        const imgBytes = new Uint8Array(ab);
+                        const payload = new Uint8Array(1 + imgBytes.length);
+                        payload[0] = 0x01;
+                        payload.set(imgBytes, 1);
+                        ws.send(payload.buffer);
+                    });
+                }
+            }, 'image/jpeg', 0.8);
         }
 
         function stopAllMedia() {
@@ -401,4 +536,5 @@
         }
     </script>
 </body>
+
 </html>

@@ -191,37 +191,77 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
   }
 
   void _handleMessage(dynamic message) {
-    if (message is String) {
+    if (message is Uint8List) {
+      try {
+        if (message.isEmpty) return;
+        final typeByte = message[0];
+        
+        if (typeByte == 0x00) {
+          // Audio
+          final audioBytes = message.sublist(1);
+          final int16List = audioBytes.buffer.asInt16List(audioBytes.offsetInBytes, audioBytes.lengthInBytes ~/ 2);
+          FlutterPcmSound.feed(PcmArrayInt16.fromList(int16List));
+        } else if (typeByte == 0x02) {
+          // JSON Control
+          final jsonStr = utf8.decode(message.sublist(1));
+          final data = jsonDecode(jsonStr);
+          final type = data['type'];
+          
+          if (type == 'text') {
+             print("Gemini: ${data['content'] ?? data['data']}");
+          } else if (type == 'camera_control') {
+             final panDelta = data['pan_delta'];
+             if (panDelta != null) {
+                print("Moving Camera Pan Delta: $panDelta");
+                _bleServoService.setDelta(panDelta.toString());
+             }
+          } else if (type == 'interrupted') {
+             print("--- INTERRUPT SIGNAL RECEIVED (JSON) ---");
+             _interruptAudio();
+          }
+        } else if (typeByte == 0x03) {
+             print("--- FAST INTERRUPT SIGNAL RECEIVED (BINARY) ---");
+             _interruptAudio();
+        }
+      } catch (e) {
+        print("Error parsing binary message: $e");
+      }
+    } else if (message is String) {
       try {
         final data = jsonDecode(message);
         final type = data['type'];
-        // print("Received WS Message: $type"); // Reduced logging
 
         if (type == 'audio') {
           final audioBase64 = data['data'];
           if (audioBase64 != null) {
             final audioBytes = base64Decode(audioBase64);
-            // Feed to PCM player
-            // PcmArrayInt16.fromList takes List<int>
-            // audioBytes is Uint8List. We need to interpret it as Int16.
-            // We can view the buffer.
             final int16List = audioBytes.buffer.asInt16List();
             FlutterPcmSound.feed(PcmArrayInt16.fromList(int16List));
           }
         } else if (type == 'text') {
            print("Gemini: ${data['content']}");
         } else if (type == 'camera_control') {
-           // Handle Camera Control Tool
            final panDelta = data['pan_delta'];
            if (panDelta != null) {
-              print("Moving Camera Pan Delta: $panDelta");
               _bleServoService.setDelta(panDelta.toString());
            }
+        } else if (type == 'interrupted') {
+           _interruptAudio();
         }
-
       } catch (e) {
-        print("Error parsing message: $e");
+        print("Error parsing string message: $e");
       }
+    }
+  }
+
+  void _interruptAudio() {
+    try {
+      // Attempt to stop PCM sound and recreate to clear buffers
+      FlutterPcmSound.stop().then((_) {
+          FlutterPcmSound.setup(sampleRate: 24000, channelCount: 1);
+      }).catchError((e){ print("Error recovering audio setup: $e"); });
+    } catch(e) {
+      print("Failed to interrupt audio: $e");
     }
   }
 
@@ -232,12 +272,10 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
       // Removed energy calculation and logging to reduce overhead
       if (data.isEmpty) return;
 
-      final b64 = base64Encode(data);
-      final payload = jsonEncode({
-        "type": "audio",
-        "data": b64,
-        "mime_type": "audio/pcm;rate=$_sampleRate",
-      });
+      final payload = Uint8List(data.length + 1);
+      payload[0] = 0x00;
+      payload.setRange(1, payload.length, data);
+      
       _channel!.sink.add(payload);
     } catch (e) {
       print("Send Audio Error: $e");
@@ -272,12 +310,9 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
       final jpeg = await compute(convertYUV420toJPEG, request);
 
       if (jpeg != null) {
-        final b64 = base64Encode(jpeg);
-        final payload = jsonEncode({
-          "type": "image",
-          "data": b64,
-          "mime_type": "image/jpeg",
-        });
+        final payload = Uint8List(jpeg.length + 1);
+        payload[0] = 0x01;
+        payload.setRange(1, payload.length, jpeg);
         _channel!.sink.add(payload);
       }
     } catch (e) {

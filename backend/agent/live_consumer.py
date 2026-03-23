@@ -4,6 +4,9 @@ import json
 import logging
 import asyncio
 import base64
+import numpy as np
+import torch
+from silero_vad import load_silero_vad
 from channels.generic.websocket import AsyncWebsocketConsumer
 from google import genai
 from google.genai import types
@@ -39,6 +42,15 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
             # For testing/dev, maybe default to first patient or handle error
             # For now, we'll try to find a patient profile if user is valid
             pass
+
+        try:
+            self.vad_model = load_silero_vad()
+            self.ai_is_speaking = False
+            self.silence_hangover_chunks = 0
+            logger.info("Silero VAD model loaded successfully.")
+        except Exception as e:
+            logger.error(f"Failed to load Silero VAD: {e}")
+            self.vad_model = None
             
         self.task = asyncio.create_task(self.run_gemini_session())
         logger.info(f"Gemini Live WebSocket connected for user: {self.user}")
@@ -128,37 +140,104 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                 pass
         logger.info("Gemini Live WebSocket disconnected")
 
-    async def receive(self, text_data):
+    async def receive(self, text_data=None, bytes_data=None):
         """
         Receive message from WebSocket (Client)
-        Expected format:
-        {
-            "type": "audio" | "image" | "text",
-            "data": "base64_encoded_string", 
-        "mime_type": "audio/pcm;rate=16000" (optional/required depending on type)
-        }
+        Binary Protocol First Byte:
+        0x00: Audio (PCM 16-bit)
+        0x01: Image (JPEG)
+        0x02: JSON Control
+        0x03: Interrupt (not usually received from client, but available)
         """
         try:
-            data = json.loads(text_data)
-            msg_type = data.get("type")
-            
-            if msg_type in ["audio", "image"]:
-                # Construct the payload for Gemini
-                # User snippet uses: {"mime_type": ..., "data": ...}
-                payload = {
-                    "mime_type": data.get("mime_type"),
-                    "data": data.get("data")
-                }
-                await self.input_queue.put(payload)
-            elif msg_type == "text":
-                # For text, we might want to signal end of turn
-                payload = data.get("data") # Just the text string
-                # We might need to wrap it specifically or handle it in sender_loop
-                # For now let's assume we pass it directly and handle logic in sender
-                await self.input_queue.put({"text": payload})
+            if bytes_data:
+                msg_type_byte = bytes_data[0]
+                payload_data = bytes_data[1:]
+
+                if msg_type_byte == 0x00:
+                    # VAD Check before sending to Gemini
+                    if self.vad_model is not None and len(payload_data) >= 1024: # 1024 bytes = 512 int16 samples
+                        audio_int16 = np.frombuffer(payload_data, dtype=np.int16)
+                        audio_float32 = audio_int16.astype(np.float32) / 32768.0
+                        tensor = torch.from_numpy(audio_float32)
+                        
+                        try:
+                            is_speech = False
+                            max_amp = torch.max(torch.abs(tensor)).item()
+                            for i in range(0, len(tensor), 512):
+                                chunk = tensor[i:i+512]
+                                if len(chunk) < 512:
+                                    continue # Skip trailing short chunks
+                                speech_prob = self.vad_model(chunk, 16000).item()
+                                if speech_prob > 0.5:
+                                    is_speech = True
+                                    break
+                            
+                            prev_vad = getattr(self, 'last_vad_state', False)
+                            
+                            if is_speech:
+                                self.silence_hangover_chunks = 15
+                            
+                            if is_speech and not prev_vad:
+                                print(f"🗣️ VAD Triggered: Speech START (Max Amp: {max_amp:.4f})", flush=True)
+                            elif not is_speech and prev_vad:
+                                print(f"🔇 VAD Triggered: Speech END (Max Amp: {max_amp:.4f})", flush=True)
+                                
+                            self.last_vad_state = is_speech
+
+                            if not is_speech:
+                                if getattr(self, 'silence_hangover_chunks', 0) > 0:
+                                    self.silence_hangover_chunks -= 1
+                                    # DO NOT drop! Let Gemini hear the end-of-speech silence naturally.
+                                else:
+                                    print(f"Dropped silent audio. Max Amp: {max_amp:.4f}", flush=True)
+                                    return # Drop silence packet
+                                
+                            # Fast interrupt check
+                            if getattr(self, 'ai_is_speaking', False) and is_speech:
+                                print("VAD detected speech while AI speaking. Triggering FAST INTERRUPT!", flush=True)
+                                await self.send(bytes_data=bytes([0x03])) # Send 0x03 Interrupt binary to frontend immediately
+                                self.ai_is_speaking = False
+                        except Exception as ve:
+                            print(f"VAD error: {ve}", flush=True)
+
+                    # Gemini v1beta multimodal currently expects base64 or raw via specific fields 
+                    # We wrap in base64 here to keep Gemini SDK happy for now.
+                    b64_audio = base64.b64encode(payload_data).decode('utf-8')
+                    await self.input_queue.put({
+                        "mime_type": "audio/pcm;rate=16000",
+                        "data": b64_audio
+                    })
+
+                elif msg_type_byte == 0x01:
+                    b64_image = base64.b64encode(payload_data).decode('utf-8')
+                    await self.input_queue.put({
+                        "mime_type": "image/jpeg",
+                        "data": b64_image
+                    })
+                
+                elif msg_type_byte == 0x02:
+                    data = json.loads(payload_data.decode('utf-8'))
+                    if data.get("type") == "text":
+                        await self.input_queue.put({"text": data.get("content") or data.get("data")})
+                
+                return
+
+            if text_data:
+                # Fallback for old text protocol
+                data = json.loads(text_data)
+                msg_type = data.get("type")
+                if msg_type in ["audio", "image"]:
+                    payload = {
+                        "mime_type": data.get("mime_type"),
+                        "data": data.get("data")
+                    }
+                    await self.input_queue.put(payload)
+                elif msg_type == "text":
+                    await self.input_queue.put({"text": data.get("data")})
 
         except Exception as e:
-            logger.error(f"Error receiving data: {e}")
+            logger.error(f"Error receiving data: {e}", exc_info=True)
 
     @database_sync_to_async
     def save_vital_reading(self, vital_type_str, value, systolic=None, diastolic=None):
@@ -329,67 +408,66 @@ Rules:
                             server_content = getattr(response, "server_content", None)
                             if server_content:
                                 logger.info(f"Server content: turn_complete={server_content.turn_complete}, interrupted={server_content.interrupted}")
+                                if server_content.interrupted:
+                                    logger.info("Gemini signaled interrupt. Sending 0x03 to frontend.")
+                                    await self.send(bytes_data=bytes([0x03]))
+                                    self.ai_is_speaking = False
 
                             # Handle Tool Calls
                             if response.tool_call:
                                 logger.info(f"Received tool call: {response.tool_call}")
-                                function_responses = []
                                 
-                                for fc in response.tool_call.function_calls:
-                                    fn_name = fc.name
-                                    args = fc.args
-                                    
-                                    function_response_content = {}
-                                    
-                                    if fn_name == "move_camera":
-                                        # Send to frontend
-                                        pan_delta = args.get("pan_delta", 0)
-                                        # tilt_delta = args.get("tilt_delta", 0) # Removed as per plan
+                                async def process_tools(tool_call, current_session):
+                                    function_responses = []
+                                    for fc in tool_call.function_calls:
+                                        fn_name = fc.name
+                                        args = fc.args
+                                        function_response_content = {}
                                         
-                                        await self.send(text_data=json.dumps({
-                                            "type": "camera_control",
-                                            "pan_delta": pan_delta
-                                        }))
-                                        function_response_content = {"result": "Camera movement command sent"}
+                                        if fn_name == "move_camera":
+                                            pan_delta = args.get("pan_delta", 0)
+                                            payload = bytes([0x02]) + json.dumps({
+                                                "type": "camera_control",
+                                                "pan_delta": pan_delta
+                                            }).encode('utf-8')
+                                            await self.send(bytes_data=payload)
+                                            function_response_content = {"result": "Camera movement command sent"}
+                                            
+                                        elif fn_name == "record_vital_reading":
+                                            result = await self.save_vital_reading(
+                                                vital_type_str=args.get("vital_type"),
+                                                value=args.get("value"),
+                                                systolic=args.get("systolic"),
+                                                diastolic=args.get("diastolic")
+                                            )
+                                            function_response_content = result
+                                        else:
+                                            function_response_content = {"error": f"Unknown function {fn_name}"}
+
+                                        function_responses.append(types.FunctionResponse(
+                                            name=fn_name,
+                                            id=fc.id,
+                                            response=function_response_content
+                                        ))
+
+                                    if function_responses:
+                                        tool_response = types.LiveClientToolResponse(function_responses=function_responses)
+                                        await current_session.send(input=tool_response)
                                         
-                                    elif fn_name == "record_vital_reading":
-                                        # Save to DB
-                                        result = await self.save_vital_reading(
-                                            vital_type_str=args.get("vital_type"),
-                                            value=args.get("value"),
-                                            systolic=args.get("systolic"),
-                                            diastolic=args.get("diastolic")
-                                        )
-                                        function_response_content = result
-                                    else:
-                                        function_response_content = {"error": f"Unknown function {fn_name}"}
-
-                                    function_responses.append(types.FunctionResponse(
-                                        name=fn_name,
-                                        id=fc.id,
-                                        response=function_response_content
-                                    ))
-
-                                # Send tool response back to Gemini
-                                if function_responses:
-                                    tool_response = types.LiveClientToolResponse(
-                                        function_responses=function_responses
-                                    )
-                                    await session.send(input=tool_response)
+                                asyncio.create_task(process_tools(response.tool_call, session))
 
                             if response.data:
-                                b64_audio = base64.b64encode(response.data).decode('utf-8')
-                                await self.send(text_data=json.dumps({
-                                    "type": "audio",
-                                    "data": b64_audio
-                                }))
+                                self.ai_is_speaking = True
+                                payload = bytes([0x00]) + response.data
+                                await self.send(bytes_data=payload)
 
                             if response.text:
                                 logger.info(f"Received text: {response.text[:50]}...")
-                                await self.send(text_data=json.dumps({
+                                payload = bytes([0x02]) + json.dumps({
                                     "type": "text",
                                     "content": response.text
-                                }))
+                                }).encode('utf-8')
+                                await self.send(bytes_data=payload)
                         
                         logger.info("Receiver loop finished (turn complete). Re-entering...")
                         if self.stop_event.is_set():
@@ -427,7 +505,7 @@ Rules:
                     await self.session.send(input=item["text"], end_of_turn=True)
                 else:
                     # It's media (audio/image) dict {"mime_type":..., "data":...}
-                    # logger.info("Sending media chunk to Gemini") # noisy
+                    # Send dict with Base64 exactly as the SDK expects for LiveConnect!
                     await self.session.send(input=item)
                     
         except asyncio.CancelledError:

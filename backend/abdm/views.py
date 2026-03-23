@@ -401,8 +401,6 @@ def list_requests_view(request):
 
 @api_view(['POST'])
 @permission_classes([AllowAny]) # Webhooks come from server-to-server
-@api_view(['POST'])
-@permission_classes([AllowAny]) # Webhooks come from server-to-server
 def abdm_webhook_view(request):
     """
     POST /api/v1/abdm/webhook
