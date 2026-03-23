@@ -389,109 +389,78 @@ Rules:
             ),
         )
 
-        try:
-            async with client.aio.live.connect(model=MODEL, config=config) as session:
-                self.session = session
-                logger.info("Connected to Gemini Live")
-                
-                # Start the sender loop
-                sender_task = asyncio.create_task(self.sender_loop())
+        while not self.stop_event.is_set():
+            try:
+                async with client.aio.live.connect(model=MODEL, config=config) as session:
+                    self.session = session
+                    logger.info("Connected to Gemini Live")
+                    
+                    # Start the sender loop
+                    sender_task = asyncio.create_task(self.sender_loop())
 
-                # Receiver loop
-                logger.info("Starting receiver loop")
-                try:
-                    while not self.stop_event.is_set():
-                        async for response in session.receive():
+                    # Receiver loop
+                    logger.info("Starting receiver loop")
+                    try:
+                        while not self.stop_event.is_set():
+                            async for response in session.receive():
+                                if self.stop_event.is_set():
+                                    break
+                                
+                                # 1. Handle actual media/text content first
+                                if response.data:
+                                    self.ai_is_speaking = True
+                                    payload = bytes([0x00]) + response.data
+                                    await self.send(bytes_data=payload)
+
+                                if response.text:
+                                    logger.info(f"[AI_SPEAKING={self.ai_is_speaking}] Received text: {response.text[:50]}...")
+                                    payload = bytes([0x02]) + json.dumps({
+                                        "type": "text",
+                                        "content": response.text
+                                    }).encode('utf-8')
+                                    await self.send(bytes_data=payload)
+                                    
+                                # 2. Handle Server Signals (turn_complete MUST override audio chunks in the same payload)
+                                server_content = getattr(response, "server_content", None)
+                                if server_content:
+                                    if getattr(server_content, 'interrupted', False):
+                                        logger.info(f"[AI_SPEAKING={self.ai_is_speaking}] Gemini signaled interrupt. Sending 0x03 to frontend.")
+                                        await self.send(bytes_data=bytes([0x03]))
+                                        self.ai_is_speaking = False
+                                        
+                                    if getattr(server_content, 'turn_complete', False):
+                                        logger.info(f"[AI_SPEAKING={self.ai_is_speaking}] Server content: turn_complete=True. Resetting flag.")
+                                        self.ai_is_speaking = False
+                            
+                            logger.info("Receiver loop finished (turn complete). Re-entering...")
                             if self.stop_event.is_set():
                                 break
                             
-                            server_content = getattr(response, "server_content", None)
-                            if server_content:
-                                logger.info(f"Server content: turn_complete={server_content.turn_complete}, interrupted={server_content.interrupted}")
-                                if server_content.interrupted:
-                                    logger.info("Gemini signaled interrupt. Sending 0x03 to frontend.")
-                                    await self.send(bytes_data=bytes([0x03]))
-                                    self.ai_is_speaking = False
+                            # Small delay to prevent busy looping if connection is dead but not raising error
+                            await asyncio.sleep(0.05)
 
-                            # Handle Tool Calls
-                            if response.tool_call:
-                                logger.info(f"Received tool call: {response.tool_call}")
-                                
-                                async def process_tools(tool_call, current_session):
-                                    function_responses = []
-                                    for fc in tool_call.function_calls:
-                                        fn_name = fc.name
-                                        args = fc.args
-                                        function_response_content = {}
-                                        
-                                        if fn_name == "move_camera":
-                                            pan_delta = args.get("pan_delta", 0)
-                                            payload = bytes([0x02]) + json.dumps({
-                                                "type": "camera_control",
-                                                "pan_delta": pan_delta
-                                            }).encode('utf-8')
-                                            await self.send(bytes_data=payload)
-                                            function_response_content = {"result": "Camera movement command sent"}
-                                            
-                                        elif fn_name == "record_vital_reading":
-                                            result = await self.save_vital_reading(
-                                                vital_type_str=args.get("vital_type"),
-                                                value=args.get("value"),
-                                                systolic=args.get("systolic"),
-                                                diastolic=args.get("diastolic")
-                                            )
-                                            function_response_content = result
-                                        else:
-                                            function_response_content = {"error": f"Unknown function {fn_name}"}
-
-                                        function_responses.append(types.FunctionResponse(
-                                            name=fn_name,
-                                            id=fc.id,
-                                            response=function_response_content
-                                        ))
-
-                                    if function_responses:
-                                        tool_response = types.LiveClientToolResponse(function_responses=function_responses)
-                                        await current_session.send(input=tool_response)
-                                        
-                                asyncio.create_task(process_tools(response.tool_call, session))
-
-                            if response.data:
-                                self.ai_is_speaking = True
-                                payload = bytes([0x00]) + response.data
-                                await self.send(bytes_data=payload)
-
-                            if response.text:
-                                logger.info(f"Received text: {response.text[:50]}...")
-                                payload = bytes([0x02]) + json.dumps({
-                                    "type": "text",
-                                    "content": response.text
-                                }).encode('utf-8')
-                                await self.send(bytes_data=payload)
+                    except Exception as inner_e:
+                        logger.error(f"Error inside receiver loop: {inner_e}", exc_info=True)
                         
-                        logger.info("Receiver loop finished (turn complete). Re-entering...")
-                        if self.stop_event.is_set():
-                            break
-                        
-                        # Small delay to prevent busy looping if connection is dead but not raising error
-                        await asyncio.sleep(0.05)
-
-                except Exception as inner_e:
-                    logger.error(f"Error inside receiver loop: {inner_e}", exc_info=True)
+                    sender_task.cancel()
                     
-                sender_task.cancel()
+                if self.stop_event.is_set():
+                    break
+                    
+                logger.warning("Gemini session disconnected silently, reconnecting in 1s...")
+                await asyncio.sleep(1)
 
-        except asyncio.CancelledError:
-            logger.info("Gemini session cancelled")
-            pass
-        except Exception as e:
-            logger.error(f"Gemini session error: {e}", exc_info=True)
-            try:
-                await self.send(text_data=json.dumps({"error": f"Gemini Error: {str(e)}"}))
-            except:
-                pass
-        finally:
-            logger.info("Exiting run_gemini_session")
+            except asyncio.CancelledError:
+                logger.info("Gemini session cancelled")
+                break
+            except Exception as e:
+                logger.error(f"Gemini session error: {e}", exc_info=True)
+                if self.stop_event.is_set():
+                    break
+                logger.warning("Gemini session crashed, reconnecting in 2s...")
+                await asyncio.sleep(2)
+        
+        logger.info("Exiting run_gemini_session")
 
     async def sender_loop(self):
         logger.info("Starting sender loop")
