@@ -11,7 +11,7 @@ class ApiService {
   String? _refreshToken;
 
   static const String baseUrl =
-      'http://13.50.110.215:8000'; // Change for production
+      'http://backend.hellocarepal.com'; // Change for production
 
   void initialize() {
     _dio = Dio(
