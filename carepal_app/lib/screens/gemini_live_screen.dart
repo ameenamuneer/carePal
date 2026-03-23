@@ -120,10 +120,21 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
       // Init Mic using record package
       if (await _audioRecorder.hasPermission()) {
         final stream = await _audioRecorder.startStream(
-          const RecordConfig(
+          RecordConfig(
             encoder: AudioEncoder.pcm16bits,
             sampleRate: _sampleRate,
             numChannels: 1,
+            // voiceCommunication enables Android hardware AEC (echo cancellation)
+            // so the mic doesn't pick up the speaker output.
+            androidConfig: const AndroidRecordConfig(
+              audioSource: AndroidAudioSource.voiceCommunication,
+            ),
+            iosConfig: const IosRecordConfig(
+              categoryOptions: [
+                IosAudioCategoryOption.allowBluetooth,
+                IosAudioCategoryOption.defaultToSpeaker,
+              ],
+            ),
           ),
         );
 
