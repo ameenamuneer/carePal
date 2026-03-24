@@ -95,7 +95,7 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
 
   Future<void> _initAudio() async {
     try {
-      // Init Audio Session
+      // Step 1: Configure audio session attributes FIRST
       final session = await AudioSession.instance;
       await session.configure(
         AudioSessionConfiguration(
@@ -117,15 +117,24 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
         ),
       );
 
-      // Init Mic using record package
+      // Step 2: Init the PCM player BEFORE the mic starts.
+      // CRITICAL for Android 10: FlutterPcmSound.setup() calls
+      // AudioManager.setMode(MODE_IN_COMMUNICATION) + setSpeakerphoneOn(true)
+      // natively. The hardware AEC wires its reference signal at the moment
+      // AudioRecord is created — so MODE_IN_COMMUNICATION MUST be active first.
+      // If we start the mic first, AEC has no reference and produces no cancellation.
+      await FlutterPcmSound.setup(sampleRate: 24000, channelCount: 1);
+
+      // Step 3: Now start the mic — AEC is already configured and active.
       if (await _audioRecorder.hasPermission()) {
         final stream = await _audioRecorder.startStream(
           RecordConfig(
             encoder: AudioEncoder.pcm16bits,
             sampleRate: _sampleRate,
             numChannels: 1,
-            // voiceCommunication enables Android hardware AEC (echo cancellation)
-            // so the mic doesn't pick up the speaker output.
+            // VOICE_COMMUNICATION source enables hardware AEC on Android.
+            // On Android 10, this MUST be started AFTER FlutterPcmSound.setup()
+            // has activated MODE_IN_COMMUNICATION so AEC gets a reference signal.
             androidConfig: const AndroidRecordConfig(
               audioSource: AndroidAudioSource.voiceCommunication,
             ),
@@ -140,9 +149,6 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
 
         _audioSubscription = stream.listen(
           (data) {
-            // CRITICAL: Drop this chunk if not connected or disposed.
-            // This prevents a massive audio backlog building up in Dart's
-            // event queue when the WebSocket is slow or closed.
             if (!_isConnected || _isDisposed) return;
             _sendAudio(data);
           },
@@ -151,9 +157,6 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
           cancelOnError: false,
         );
       }
-
-      // Init Player
-      await FlutterPcmSound.setup(sampleRate: 24000, channelCount: 1);
     } catch (e) {
       print("Audio Error: $e");
     }
@@ -277,13 +280,13 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen> {
   }
 
   void _interruptAudio() {
-    // In flutter_pcm_sound v3.x, the only way to flush the buffer is to
-    // release the engine and reinitialize it. No stop() or clear() exists.
-    FlutterPcmSound.release().then((_) {
-      FlutterPcmSound.setup(sampleRate: 24000, channelCount: 1);
-      print("Audio engine reset on interrupt.");
-    }).catchError((e) {
-      print("Failed to interrupt audio: $e");
+    // Use clear() NOT release()+setup(). Calling setup() again fires
+    // requestAudioFocus() a second time, which triggers an audio focus
+    // change event that causes audio_session to pause the mic recording.
+    // clear() only flushes the pending audio queue — no teardown, no focus
+    // re-request, the mic stays alive and recording continues uninterrupted.
+    FlutterPcmSound.clear().catchError((e) {
+      print("Failed to clear audio on interrupt: $e");
     });
   }
 

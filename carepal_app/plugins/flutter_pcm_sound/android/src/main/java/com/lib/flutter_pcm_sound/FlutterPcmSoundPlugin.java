@@ -103,7 +103,10 @@ public class FlutterPcmSoundPlugin implements
                                 .getSystemService(android.content.Context.AUDIO_SERVICE);
                         if (am != null) {
                             am.setMode(AudioManager.MODE_IN_COMMUNICATION);
-                            if (Build.VERSION.SDK_INT >= 31) { // Android 12+
+
+                            if (Build.VERSION.SDK_INT >= 31) {
+                                // Android 12+: setSpeakerphoneOn is deprecated.
+                                // Use the new setCommunicationDevice API instead.
                                 android.media.AudioDeviceInfo speakerDevice = null;
                                 java.util.List<android.media.AudioDeviceInfo> devices = am
                                         .getAvailableCommunicationDevices();
@@ -114,10 +117,32 @@ public class FlutterPcmSoundPlugin implements
                                     }
                                 }
                                 if (speakerDevice != null) {
-                                    am.setCommunicationDevice(speakerDevice);
+                                    boolean ok = am.setCommunicationDevice(speakerDevice);
+                                    android.util.Log.d("FlutterPcmSound", "setCommunicationDevice(SPEAKER): " + ok);
+                                } else {
+                                    android.util.Log.w("FlutterPcmSound",
+                                            "BUILTIN_SPEAKER not found in communication devices");
                                 }
                             } else {
+                                // Android 10 (API 29) and below:
+                                // setSpeakerphoneOn requires active audio focus to take effect.
+                                // Request focus first, then route.
+                                if (Build.VERSION.SDK_INT >= 26) {
+                                    android.media.AudioFocusRequest focusReq = new android.media.AudioFocusRequest.Builder(
+                                            AudioManager.AUDIOFOCUS_GAIN)
+                                            .setAudioAttributes(new AudioAttributes.Builder()
+                                                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                                                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                                    .build())
+                                            .build();
+                                    am.requestAudioFocus(focusReq);
+                                } else {
+                                    am.requestAudioFocus(null, AudioManager.STREAM_VOICE_CALL,
+                                            AudioManager.AUDIOFOCUS_GAIN);
+                                }
                                 am.setSpeakerphoneOn(true);
+                                android.util.Log.d("FlutterPcmSound",
+                                        "setSpeakerphoneOn(true) isSpeakerphoneOn=" + am.isSpeakerphoneOn());
                             }
                         }
                     }
@@ -199,6 +224,15 @@ public class FlutterPcmSoundPlugin implements
                         mTotalFeeds += 1;
                     }
 
+                    result.success(true);
+                    break;
+                }
+                case "clear": {
+                    // Flush the sample queue without releasing the AudioTrack or
+                    // re-requesting audio focus. Safe to call from interrupt handler.
+                    synchronized (mSamples) {
+                        mSamples.clear();
+                    }
                     result.success(true);
                     break;
                 }

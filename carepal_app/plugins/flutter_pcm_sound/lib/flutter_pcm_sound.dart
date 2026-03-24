@@ -90,6 +90,13 @@ class FlutterPcmSound {
     return await _invokeMethod('release');
   }
 
+  /// flush buffered audio samples immediately without releasing the AudioTrack.
+  /// Use this for interrupts — unlike release(), this does NOT re-request
+  /// audio focus and will NOT disrupt the mic recording session.
+  static Future<void> clear() async {
+    return await _invokeMethod('clear');
+  }
+
   static Future<T?> _invokeMethod<T>(String method, [dynamic arguments]) async {
     if (_logLevel.index >= LogLevel.standard.index) {
       String args = '';
