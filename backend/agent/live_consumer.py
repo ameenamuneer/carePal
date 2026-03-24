@@ -163,6 +163,7 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                         
                         try:
                             is_speech = False
+                            is_confident_speech = False
                             max_amp = torch.max(torch.abs(tensor)).item()
                             for i in range(0, len(tensor), 512):
                                 chunk = tensor[i:i+512]
@@ -171,6 +172,8 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                                 speech_prob = self.vad_model(chunk, 16000).item()
                                 if speech_prob > 0.5:
                                     is_speech = True
+                                if speech_prob > 0.75:
+                                    is_confident_speech = True
                                     break
                             
                             prev_vad = getattr(self, 'last_vad_state', False)
@@ -193,10 +196,13 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                                     print(f"Dropped silent audio. Max Amp: {max_amp:.4f}", flush=True)
                                     return # Drop silence packet
                                 
-                            # Fast interrupt check
-                            if getattr(self, 'ai_is_speaking', False) and is_speech:
-                                print("VAD detected speech while AI speaking. Triggering FAST INTERRUPT!", flush=True)
-                                await self.send(bytes_data=bytes([0x03])) # Send 0x03 Interrupt binary to frontend immediately
+                            # Fast interrupt: only trigger if we have HIGH CONFIDENCE speech
+                            # (prob > 0.75). The lower 0.5 threshold above is only for
+                            # silence detection. This prevents echo at partial amplitude
+                            # from firing a false interrupt when the AI is speaking.
+                            if getattr(self, 'ai_is_speaking', False) and is_confident_speech:
+                                print("VAD detected confident speech while AI speaking. Triggering FAST INTERRUPT!", flush=True)
+                                await self.send(bytes_data=bytes([0x03]))
                                 self.ai_is_speaking = False
                         except Exception as ve:
                             print(f"VAD error: {ve}", flush=True)
