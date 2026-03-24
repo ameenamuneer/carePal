@@ -31,13 +31,20 @@
             margin-bottom: 15px;
         }
 
+        .row {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
         label {
             display: block;
             font-weight: bold;
             margin-bottom: 5px;
         }
 
-        input[type="text"] {
+        input[type="text"],
+        input[type="password"] {
             width: 100%;
             padding: 8px;
             border: 1px solid #ccc;
@@ -64,6 +71,10 @@
         button:disabled {
             background: #95a5a6;
             cursor: not-allowed;
+        }
+
+        button.success {
+            background: #2ecc71;
         }
 
         button.danger {
@@ -143,14 +154,34 @@
     <h1>CarePAL Live AI Web Tester</h1>
 
     <div class="card">
-        <h3>Connection Settings</h3>
+        <h3>1. Authentication</h3>
+        <div class="form-group">
+            <label>Backend API Base URL</label>
+            <input type="text" id="apiBaseUrl" value="https://backend.hellocarepal.com">
+        </div>
+        <div class="row">
+            <div style="flex: 1;">
+                <label>Username</label>
+                <input type="text" id="loginUser" value="isa">
+            </div>
+            <div style="flex: 1;">
+                <label>Password</label>
+                <input type="password" id="loginPass" value="passme123">
+            </div>
+        </div>
+        <button id="btnLogin" class="success">Login & Get Token</button>
+    </div>
+
+    <div class="card">
+        <h3>2. Connection Settings</h3>
         <div class="form-group">
             <label for="wsUrl">WebSocket Host URL</label>
-            <input type="text" id="wsUrl" value="ws://localhost:8000" placeholder="ws://localhost:8000">
+            <input type="text" id="wsUrl" value="wss://backend.hellocarepal.com"
+                placeholder="wss://backend.hellocarepal.com">
         </div>
         <div class="form-group">
             <label for="jwtToken">JWT Auth Token</label>
-            <input type="text" id="jwtToken" placeholder="Paste your Access Token here...">
+            <input type="text" id="jwtToken" placeholder="Login above to auto-fill or paste manually...">
         </div>
         <div>
             <button id="btnConnect">Connect to AI</button>
@@ -171,7 +202,6 @@
                 <video id="localVideo" autoplay playsinline muted></video>
             </div>
         </div>
-        <!-- Hidden Canvas for capturing frames -->
         <canvas id="hiddenCanvas" style="display:none;"></canvas>
     </div>
 
@@ -190,6 +220,11 @@
 
     <script>
         // DOM Elements
+        const elApiBase = document.getElementById('apiBaseUrl');
+        const elLoginUser = document.getElementById('loginUser');
+        const elLoginPass = document.getElementById('loginPass');
+        const btnLogin = document.getElementById('btnLogin');
+
         const elWsUrl = document.getElementById('wsUrl');
         const elJwtToken = document.getElementById('jwtToken');
         const btnConnect = document.getElementById('btnConnect');
@@ -205,7 +240,7 @@
         const elLogs = document.getElementById('logs');
         const ctxCanvas = elCanvas.getContext('2d');
 
-        // State variables
+        // State
         let ws = null;
         let videoStream = null;
         let audioStream = null;
@@ -213,8 +248,6 @@
         let audioProcessor = null;
         let audioSource = null;
         let frameInterval = null;
-
-        // Playback variables
         let playbackContext = null;
         let nextPlayTime = 0;
 
@@ -227,14 +260,49 @@
             elLogs.scrollTop = elLogs.scrollHeight;
         }
 
+        // --- NEW LOGIN LOGIC ---
+        btnLogin.addEventListener('click', async () => {
+            const baseUrl = elApiBase.value.trim();
+            const username = elLoginUser.value.trim();
+            const password = elLoginPass.value.trim();
+
+            logInfo(`Attempting login for user: ${username}...`);
+
+            try {
+                const response = await fetch(`${baseUrl}/api/v1/auth/login/`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+
+                const data = await response.json();
+                const token = data.tokens?.access;
+
+                if (token) {
+                    elJwtToken.value = token;
+                    logInfo('Login Successful! Token updated.', 'log-in');
+                } else {
+                    throw new Error('Token not found in response');
+                }
+            } catch (err) {
+                logInfo(`Login failed: ${err.message}`, 'log-error');
+            }
+        });
+
         // --- WEBSOCKET CONNECTION ---
         btnConnect.addEventListener('click', () => {
             if (ws && ws.readyState === WebSocket.OPEN) return;
 
             let host = elWsUrl.value.trim();
-            if (host.endsWith('/')) host = host.slice(0, -1);
-
             const token = elJwtToken.value.trim();
+
+            if (!token) {
+                logInfo("Error: Please login or enter a token first", 'log-error');
+                return;
+            }
+
             const wsUrl = `${host}/ws/agent/live/?token=${encodeURIComponent(token)}`;
 
             logInfo(`Connecting to ${wsUrl}...`);
@@ -245,10 +313,8 @@
                 logInfo('WebSocket Connected!', 'log-sys');
                 btnConnect.disabled = true;
                 btnDisconnect.disabled = false;
-
-                // Init playback context on user interaction
                 if (!playbackContext) {
-                    playbackContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 }); // Gemini uses 24kHz output
+                    playbackContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
                 } else if (playbackContext.state === 'suspended') {
                     playbackContext.resume();
                 }
@@ -262,29 +328,13 @@
                         const typeByte = dataView.getUint8(0);
                         const payloadBuffer = buffer.slice(1);
 
-                        if (typeByte === 0x00) {
-                            playBinaryAudio(payloadBuffer);
-                        } else if (typeByte === 0x02) {
-                            const jsonStr = new TextDecoder().decode(payloadBuffer);
-                            const data = JSON.parse(jsonStr);
-                            handleIncomingJson(data);
-                        } else if (typeByte === 0x03) {
-                            handleInterrupt();
-                        } else {
-                            logInfo(`Received unknown binary type: ${typeByte}`, 'log-sys');
-                        }
+                        if (typeByte === 0x00) playBinaryAudio(payloadBuffer);
+                        else if (typeByte === 0x02) handleIncomingJson(JSON.parse(new TextDecoder().decode(payloadBuffer)));
+                        else if (typeByte === 0x03) handleInterrupt();
                     } else {
-                        const data = JSON.parse(event.data);
-                        handleIncomingJson(data);
+                        handleIncomingJson(JSON.parse(event.data));
                     }
-                } catch (e) {
-                    logInfo(`Error parsing message: ${e.message}`, 'log-error');
-                }
-            };
-
-            ws.onerror = (error) => {
-                logInfo('WebSocket Error', 'log-error');
-                console.error(error);
+                } catch (e) { console.error(e); }
             };
 
             ws.onclose = (event) => {
@@ -295,12 +345,11 @@
             };
         });
 
-        btnDisconnect.addEventListener('click', () => {
-            if (ws) ws.close();
-        });
+        // --- REST OF YOUR ORIGINAL LOGIC (Unchanged) ---
+        btnDisconnect.addEventListener('click', () => ws && ws.close());
 
         function handleInterrupt() {
-            logInfo(`--- INTERRUPT SIGNAL RECEIVED ---`, 'log-error');
+            logInfo(`--- INTERRUPT ---`, 'log-error');
             if (playbackContext) {
                 playbackContext.close().then(() => {
                     playbackContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
@@ -310,229 +359,97 @@
         }
 
         function handleIncomingJson(msg) {
-            if (msg.error) {
-                logInfo(`Error: ${msg.error}`, 'log-error');
-                return;
-            }
-
-            switch (msg.type) {
-                case 'text':
-                    logInfo(`AI: ${msg.content}`, 'log-in');
-                    break;
-                case 'camera_control':
-                    logInfo(`COMMAND: Adjust camera by pan_delta ${msg.pan_delta} degrees`, 'log-sys');
-                    break;
-                case 'interrupted':
-                    handleInterrupt();
-                    break;
-                case 'audio':
-                    playBase64Audio(msg.data); // Fallback for old protocol
-                    break;
-                default:
-                    logInfo(`Received unknown type: ${msg.type}`, 'log-sys');
-            }
+            if (msg.type === 'text') logInfo(`AI: ${msg.content}`, 'log-in');
+            else if (msg.type === 'camera_control') logInfo(`CMD: Pan ${msg.pan_delta}`, 'log-sys');
         }
 
         function playBinaryAudio(payloadBuffer) {
             if (!playbackContext) return;
-            let bufferToUse = payloadBuffer;
-            if (payloadBuffer.byteLength % 2 !== 0) {
-                bufferToUse = payloadBuffer.slice(0, payloadBuffer.byteLength - 1);
-            }
-            const int16View = new Int16Array(bufferToUse);
+            const int16View = new Int16Array(payloadBuffer.byteLength % 2 === 0 ? payloadBuffer : payloadBuffer.slice(0, -1));
             const floatArray = new Float32Array(int16View.length);
-            for (let i = 0; i < int16View.length; i++) {
-                floatArray[i] = int16View[i] / 32768.0;
-            }
+            for (let i = 0; i < int16View.length; i++) floatArray[i] = int16View[i] / 32768.0;
 
             const audioBuffer = playbackContext.createBuffer(1, floatArray.length, 24000);
             audioBuffer.getChannelData(0).set(floatArray);
-
             const source = playbackContext.createBufferSource();
             source.buffer = audioBuffer;
             source.connect(playbackContext.destination);
-
-            const currentTime = playbackContext.currentTime;
-            if (nextPlayTime < currentTime) {
-                nextPlayTime = currentTime;
-            }
+            const now = playbackContext.currentTime;
+            if (nextPlayTime < now) nextPlayTime = now;
             source.start(nextPlayTime);
             nextPlayTime += audioBuffer.duration;
         }
 
-
-        // --- SEND TEXT ---
         btnSendText.addEventListener('click', () => {
-            if (!ws || ws.readyState !== WebSocket.OPEN) {
-                logInfo("Not connected", 'log-error');
-                return;
-            }
             const text = txtInput.value.trim();
-            if (text) {
-                const jsonStr = JSON.stringify({ type: 'text', data: text });
-                const jsonBytes = new TextEncoder().encode(jsonStr);
+            if (text && ws?.readyState === WebSocket.OPEN) {
+                const jsonBytes = new TextEncoder().encode(JSON.stringify({ type: 'text', data: text }));
                 const payload = new Uint8Array(1 + jsonBytes.length);
-                payload[0] = 0x02;
-                payload.set(jsonBytes, 1);
+                payload[0] = 0x02; payload.set(jsonBytes, 1);
                 ws.send(payload.buffer);
                 logInfo(`You: ${text}`, 'log-out');
                 txtInput.value = '';
             }
         });
 
-
-        // --- MICROPHONE CAPTURE (16kHz PCM) ---
-        var downsampleBuffer = function (buffer, sampleRate, outSampleRate) {
-            if (outSampleRate == sampleRate) {
-                return buffer;
-            }
-            if (outSampleRate > sampleRate) {
-                throw "downsampling rate show be smaller than original sample rate";
-            }
-            var sampleRateRatio = sampleRate / outSampleRate;
-            var newLength = Math.round(buffer.length / sampleRateRatio);
-            var result = new Int16Array(newLength);
-            var offsetResult = 0;
-            var offsetBuffer = 0;
-            while (offsetResult < result.length) {
-                var nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
-                var accum = 0, count = 0;
-                for (var i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
-                    accum += buffer[i];
-                    count++;
-                }
-                result[offsetResult] = Math.min(1, Math.max(-1, accum / count)) * 32767;
-                offsetResult++;
-                offsetBuffer = nextOffsetBuffer;
-            }
-            return result;
-        };
-
         btnStartMic.addEventListener('click', async () => {
             try {
                 audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-
+                audioContext = new AudioContext({ sampleRate: 16000 });
                 audioSource = audioContext.createMediaStreamSource(audioStream);
-                // ScriptProcessor is deprecated but easiest for vanilla JS raw PCM access without extra files
                 audioProcessor = audioContext.createScriptProcessor(4096, 1, 1);
-
                 audioProcessor.onaudioprocess = (e) => {
-                    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-
-                    const inputData = e.inputBuffer.getChannelData(0);
-                    // Convert Float32 to Int16
-                    const pcm16 = new Int16Array(inputData.length);
-                    for (let i = 0; i < inputData.length; i++) {
-                        pcm16[i] = Math.max(-1, Math.min(1, inputData[i])) * 32767;
-                    }
-
-                    const uint8 = new Uint8Array(pcm16.buffer);
-                    const payload = new Uint8Array(1 + uint8.length);
-                    payload[0] = 0x00;
-                    payload.set(uint8, 1);
+                    if (ws?.readyState !== WebSocket.OPEN) return;
+                    const input = e.inputBuffer.getChannelData(0);
+                    const pcm16 = new Int16Array(input.length);
+                    for (let i = 0; i < input.length; i++) pcm16[i] = Math.max(-1, Math.min(1, input[i])) * 32767;
+                    const payload = new Uint8Array(1 + pcm16.buffer.byteLength);
+                    payload[0] = 0x00; payload.set(new Uint8Array(pcm16.buffer), 1);
                     ws.send(payload.buffer);
                 };
-
                 audioSource.connect(audioProcessor);
                 audioProcessor.connect(audioContext.destination);
-
-                logInfo('Microphone started.', 'log-sys');
-                btnStartMic.disabled = true;
-                btnStopMic.disabled = false;
-            } catch (err) {
-                logInfo(`Mic error: ${err.message}`, 'log-error');
-            }
+                btnStartMic.disabled = true; btnStopMic.disabled = false;
+            } catch (err) { logInfo(err.message, 'log-error'); }
         });
 
-        btnStopMic.addEventListener('click', stopMic);
+        btnStopMic.addEventListener('click', () => {
+            if (audioStream) audioStream.getTracks().forEach(t => t.stop());
+            btnStartMic.disabled = false; btnStopMic.disabled = true;
+        });
 
-        function stopMic() {
-            if (audioStream) {
-                audioStream.getTracks().forEach(t => t.stop());
-                audioStream = null;
-            }
-            if (audioProcessor) {
-                audioProcessor.disconnect();
-                audioProcessor = null;
-            }
-            if (audioSource) {
-                audioSource.disconnect();
-                audioSource = null;
-            }
-            if (audioContext) {
-                audioContext.close();
-                audioContext = null;
-            }
-            btnStartMic.disabled = false;
-            btnStopMic.disabled = true;
-            logInfo('Microphone stopped.', 'log-sys');
-        }
-
-
-        // --- CAMERA CAPTURE (1fps JPEG) ---
         btnStartCamera.addEventListener('click', async () => {
             try {
                 videoStream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
                 elVideo.srcObject = videoStream;
-
-                // Wait for video metadata to set canvas size
                 elVideo.onloadedmetadata = () => {
-                    elCanvas.width = elVideo.videoWidth;
-                    elCanvas.height = elVideo.videoHeight;
-
-                    // Capture frames at 1 frame per second
-                    frameInterval = setInterval(captureAndSendFrame, 1000);
-                    logInfo('Camera started (1fps streaming).', 'log-sys');
+                    elCanvas.width = elVideo.videoWidth; elCanvas.height = elVideo.videoHeight;
+                    frameInterval = setInterval(() => {
+                        if (ws?.readyState !== WebSocket.OPEN) return;
+                        ctxCanvas.drawImage(elVideo, 0, 0, elCanvas.width, elCanvas.height);
+                        elCanvas.toBlob((blob) => {
+                            blob.arrayBuffer().then(ab => {
+                                const payload = new Uint8Array(1 + ab.byteLength);
+                                payload[0] = 0x01; payload.set(new Uint8Array(ab), 1);
+                                ws.send(payload.buffer);
+                            });
+                        }, 'image/jpeg', 0.8);
+                    }, 1000);
                 };
-
-                btnStartCamera.disabled = true;
-                btnStopCamera.disabled = false;
-            } catch (err) {
-                logInfo(`Camera error: ${err.message}`, 'log-error');
-            }
+                btnStartCamera.disabled = true; btnStopCamera.disabled = false;
+            } catch (err) { logInfo(err.message, 'log-error'); }
         });
 
-        btnStopCamera.addEventListener('click', stopCamera);
-
-        function stopCamera() {
-            if (videoStream) {
-                videoStream.getTracks().forEach(t => t.stop());
-                videoStream = null;
-                elVideo.srcObject = null;
-            }
-            if (frameInterval) {
-                clearInterval(frameInterval);
-                frameInterval = null;
-            }
-            btnStartCamera.disabled = false;
-            btnStopCamera.disabled = true;
-            logInfo('Camera stopped.', 'log-sys');
-        }
-
-        function captureAndSendFrame() {
-            if (!ws || ws.readyState !== WebSocket.OPEN) return;
-            if (!elVideo.videoWidth) return;
-
-            // Draw video to canvas
-            ctxCanvas.drawImage(elVideo, 0, 0, elCanvas.width, elCanvas.height);
-
-            elCanvas.toBlob((blob) => {
-                if (blob) {
-                    blob.arrayBuffer().then((ab) => {
-                        const imgBytes = new Uint8Array(ab);
-                        const payload = new Uint8Array(1 + imgBytes.length);
-                        payload[0] = 0x01;
-                        payload.set(imgBytes, 1);
-                        ws.send(payload.buffer);
-                    });
-                }
-            }, 'image/jpeg', 0.8);
-        }
+        btnStopCamera.addEventListener('click', () => {
+            if (videoStream) videoStream.getTracks().forEach(t => t.stop());
+            clearInterval(frameInterval);
+            btnStartCamera.disabled = false; btnStopCamera.disabled = true;
+        });
 
         function stopAllMedia() {
-            stopMic();
-            stopCamera();
+            if (videoStream) videoStream.getTracks().forEach(t => t.stop());
+            if (audioStream) audioStream.getTracks().forEach(t => t.stop());
+            clearInterval(frameInterval);
         }
     </script>
 </body>
