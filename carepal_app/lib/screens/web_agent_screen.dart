@@ -3,6 +3,7 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:permission_handler/permission_handler.dart';
+import '../services/api_service.dart';
 
 class WebAgentScreen extends StatefulWidget {
   const WebAgentScreen({super.key});
@@ -42,7 +43,14 @@ class _WebAgentScreenState extends State<WebAgentScreen> {
     await controller.setBackgroundColor(const Color(0x00000000));
     await controller.setNavigationDelegate(
       NavigationDelegate(
-        onPageFinished: (String url) {
+        onPageFinished: (String url) async {
+          final token = await ApiService().getAccessToken();
+          final baseUrl = ApiService.baseUrl;
+          final wsUrl = baseUrl.replaceFirst('https://', 'wss://').replaceFirst('http://', 'ws://');
+          
+          if (token != null) {
+            await controller.runJavaScript("window.startSession('$token', '$wsUrl');");
+          }
           if (mounted) {
             setState(() {
               _isLoading = false;

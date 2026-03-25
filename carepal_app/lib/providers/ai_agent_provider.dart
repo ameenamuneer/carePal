@@ -8,7 +8,8 @@ class AIAgentProvider with ChangeNotifier {
 
   // Initialize with base URL from environment or constant
   // Assuming a default for now, ideally passed in or retrieved from config
-  final String _baseWsUrl = 'wss://backend.hellocarepal.com';
+  // final String _baseWsUrl = 'wss://backend.hellocarepal.com';
+  final String _baseWsUrl = 'wss://valerie-nondesigned-clement.ngrok-free.dev';
 
   int? _sessionId; // Changed to int to match new service
   List<ChatMessage> _messages = [];
