@@ -996,6 +996,38 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "3.0.3"
+  webview_flutter:
+    dependency: "direct main"
+    description:
+      name: webview_flutter
+      sha256: a3da219916aba44947d3a5478b1927876a09781174b5a2b67fa5be0555154bf9
+      url: "https://pub.dev"
+    source: hosted
+    version: "4.13.1"
+  webview_flutter_android:
+    dependency: transitive
+    description:
+      name: webview_flutter_android
+      sha256: db8b8b52eb9f33d4c85064f78774e16717442629c68f48d6b8b2538dfd63e21c
+      url: "https://pub.dev"
+    source: hosted
+    version: "4.10.14"
+  webview_flutter_platform_interface:
+    dependency: transitive
+    description:
+      name: webview_flutter_platform_interface
+      sha256: "653c5eb45f6e2a716ebefd9df8006f583e6db146f5e0f5d70ca6213ca24070dd"
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.15.0"
+  webview_flutter_wkwebview:
+    dependency: transitive
+    description:
+      name: webview_flutter_wkwebview
+      sha256: "0d85e8bc5db9a7c49f6ff57cbeafc6cd8216ad9c9ebc70b2c4579d955698933a"
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.24.1"
   win32:
     dependency: transitive
     description:

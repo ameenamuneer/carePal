@@ -23,6 +23,7 @@ import 'profile/profile_screen.dart';
 import 'family/family_members_screen.dart';
 import 'admin_test_page.dart';
 import 'gemini_live_screen.dart';
+import 'web_agent_screen.dart';
 import 'appointments/appointment_list_screen.dart';
 import 'vitals/vitals_detail_screen.dart';
 
@@ -635,6 +636,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
         Navigator.push(
           context,
           MaterialPageRoute(builder: (context) => const GeminiLiveScreen()),
+        );
+      },
+      onLongPress: () {
+        Navigator.push(
+          context,
+          MaterialPageRoute(builder: (context) => const WebAgentScreen()),
         );
       },
       child: Container(
