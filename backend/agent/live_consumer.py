@@ -21,7 +21,7 @@ from vitals.models import VitalReading, VitalType
 from patients.models import PatientProfile
 from medications.models import Medication, MedicationSchedule, MedicationAdherence
 from users.models import User
-
+from agent.models import AgentSession, AgentMessage
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +128,56 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                 "vitals": "Error fetching", 
                 "medications": "Error fetching"
             }
+
+    @database_sync_to_async
+    def get_recent_messages_context(self):
+        try:
+            if not self.user or not self.user.is_authenticated:
+                return "No previous conversation."
+            
+            patient = PatientProfile.objects.filter(user=self.user).first()
+            if not patient:
+                return "No previous conversation."
+                
+            session = AgentSession.objects.filter(patient=patient, status='ACTIVE', session_type='WEBSOCKET').first()
+            if not session:
+                session = AgentSession.objects.create(
+                    patient=patient,
+                    user=self.user,
+                    session_type='WEBSOCKET',
+                    status='ACTIVE'
+                )
+            self.db_session = session
+
+            messages = AgentMessage.objects.filter(
+                session__patient=patient
+            ).order_by('-timestamp')[:30]
+            
+            messages = list(messages)[::-1]
+            if not messages:
+                return "No previous conversation."
+                
+            history = []
+            for msg in messages:
+                time_str = timezone.localtime(msg.timestamp).strftime('%Y-%m-%d %H:%M:%S')
+                history.append(f"[{time_str}] {msg.sender}: {msg.content}")
+                
+            return "\n".join(history)
+        except Exception as e:
+            logger.error(f"Error fetching recent messages: {e}")
+            return "Error fetching conversation history."
+
+    @database_sync_to_async
+    def save_turn_messages(self, user_text, ai_text):
+        try:
+            if not getattr(self, 'db_session', None):
+                return
+            if user_text:
+                AgentMessage.objects.create(session=self.db_session, sender='USER', message_type='TEXT', content=user_text)
+            if ai_text:
+                AgentMessage.objects.create(session=self.db_session, sender='AGENT', message_type='TEXT', content=ai_text)
+        except Exception as e:
+            logger.error(f"Error saving messages: {e}")
 
 
     async def disconnect(self, close_code):
@@ -302,6 +352,7 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
 
         # 1. Fetch Patient Context
         context = await self.get_patient_context()
+        recent_messages_str = await self.get_recent_messages_context()
         
         # 2. Build System Instruction
         system_instruction = f"""You are CarePAL, a compassionate AI healthcare assistant for home-bound patients.
@@ -329,6 +380,9 @@ Rules:
 - Use the 'adjust_camera' tool to adjust your view if needed by providing a descriptive textual command (e.g., 'Pan left', 'User not centered', 'look around for the patient').
 - Use the 'record_vital_reading' tool to save health data.
 - Considering that the user is in GMT +5:30, see if there are any medcations to be taked, and check if the user has taken the last medication when you get free time in the conversation..
+
+Recent conversation history:
+{recent_messages_str}
 """
 
         # 3. Define Tools
@@ -395,12 +449,15 @@ Rules:
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Zephyr")
                 )
             ),
+            input_audio_transcription=types.AudioTranscriptionConfig(),
         )
 
         while not self.stop_event.is_set():
             try:
                 async with client.aio.live.connect(model=MODEL, config=config) as session:
                     self.session = session
+                    self.current_user_text = ""
+                    self.current_ai_text = ""
                     logger.info("Connected to Gemini Live")
                     
                     # Start the sender loop
@@ -422,6 +479,7 @@ Rules:
 
                                 if response.text:
                                     logger.info(f"[AI_SPEAKING={self.ai_is_speaking}] Received text: {response.text[:50]}...")
+                                    self.current_ai_text += response.text
                                     payload = bytes([0x02]) + json.dumps({
                                         "type": "text",
                                         "content": response.text
@@ -431,6 +489,15 @@ Rules:
                                 # 2. Handle Server Signals (turn_complete MUST override audio chunks in the same payload)
                                 server_content = getattr(response, "server_content", None)
                                 if server_content:
+                                    if getattr(server_content, 'input_transcription', None):
+                                        t = server_content.input_transcription
+                                        if hasattr(t, 'text') and t.text:
+                                            self.current_user_text += t.text
+                                        elif hasattr(t, 'parts'):
+                                            for p in t.parts:
+                                                if hasattr(p, 'text') and p.text:
+                                                    self.current_user_text += p.text
+
                                     if getattr(server_content, 'interrupted', False):
                                         logger.info(f"[AI_SPEAKING={self.ai_is_speaking}] Gemini signaled interrupt. Sending 0x03 to frontend.")
                                         await self.send(bytes_data=bytes([0x03]))
@@ -439,6 +506,14 @@ Rules:
                                     if getattr(server_content, 'turn_complete', False):
                                         logger.info(f"[AI_SPEAKING={self.ai_is_speaking}] Server content: turn_complete=True. Resetting flag.")
                                         self.ai_is_speaking = False
+                                        
+                                        user_t = self.current_user_text.strip()
+                                        ai_t = self.current_ai_text.strip()
+                                        if user_t or ai_t:
+                                            asyncio.create_task(self.save_turn_messages(user_t, ai_t))
+                                            
+                                        self.current_user_text = ""
+                                        self.current_ai_text = ""
                                         
                                 # 3. Handle Tool Calls directly on response
                                 tool_call = getattr(response, "tool_call", None)
