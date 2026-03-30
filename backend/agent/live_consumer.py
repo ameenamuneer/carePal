@@ -217,6 +217,8 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
 
                 elif msg_type_byte == 0x01:
                     b64_image = base64.b64encode(payload_data).decode('utf-8')
+                    # Store latest frame for panning inference
+                    self.latest_frame_b64 = b64_image
                     await self.input_queue.put({
                         "mime_type": "image/jpeg",
                         "data": b64_image
@@ -323,8 +325,8 @@ Rules:
 - Speak clearly and warmly.
 - If you see a medical device, ask if you should record the reading.
 - If the patient seems distressed, offer to call for help (simulated).
-- Proactively pan the camera to keep the user in center of the view or if the user is showing you something for eg: a medical device, a wound, etc.
-- Use the 'move_camera' tool to adjust your view if needed.
+- Proactively pan the camera to keep the user in center of the view.
+- Use the 'adjust_camera' tool to adjust your view if needed by providing a descriptive textual command (e.g., 'Pan left', 'User not centered', 'look around for the patient').
 - Use the 'record_vital_reading' tool to save health data.
 - Considering that the user is in GMT +5:30, see if there are any medcations to be taked, and check if the user has taken the last medication when you get free time in the conversation..
 """
@@ -335,17 +337,17 @@ Rules:
             types.Tool(
                 function_declarations=[
                     types.FunctionDeclaration(
-                        name="move_camera",
-                        description="Move the camera horizontally (pan). Use positive values for right, negative for left.",
+                        name="adjust_camera",
+                        description="Adjust the camera pan/position based on a textual command.",
                         parameters=types.Schema(
                             type="OBJECT",
                             properties={
-                                "pan_delta": types.Schema(
-                                    type="INTEGER",
-                                    description="Degrees to move (e.g. 10, -10, 45, -30 etc) negative means right, positive means left. the magnitude is in integer degrees."
+                                "command": types.Schema(
+                                    type="STRING",
+                                    description="The textual command describing what action to take with the camera (e.g. 'Patient not visible', 'Pan left', 'User not centered')."
                                 )
                             },
-                            required=["pan_delta"]
+                            required=["command"]
                         )
                     ),
                     types.FunctionDeclaration(
@@ -433,11 +435,21 @@ Rules:
                                         logger.info(f"[AI_SPEAKING={self.ai_is_speaking}] Gemini signaled interrupt. Sending 0x03 to frontend.")
                                         await self.send(bytes_data=bytes([0x03]))
                                         self.ai_is_speaking = False
-                                        
+
                                     if getattr(server_content, 'turn_complete', False):
                                         logger.info(f"[AI_SPEAKING={self.ai_is_speaking}] Server content: turn_complete=True. Resetting flag.")
                                         self.ai_is_speaking = False
-                            
+                                        
+                                # 3. Handle Tool Calls directly on response
+                                tool_call = getattr(response, "tool_call", None)
+                                if tool_call and hasattr(tool_call, "function_calls"):
+                                    for fc in tool_call.function_calls:
+                                        logger.info(f"Function call requested: {fc.name}")
+                                        if fc.name == "adjust_camera":
+                                            command = fc.args.get("command", "") if hasattr(fc, "args") else ""
+                                            fc_id = getattr(fc, 'id', None)
+                                            asyncio.create_task(self.handle_adjust_camera(command, fc_id))
+                                            
                             logger.info("Receiver loop finished (turn complete). Re-entering...")
                             if self.stop_event.is_set():
                                 break
@@ -449,6 +461,10 @@ Rules:
                         logger.error(f"Error inside receiver loop: {inner_e}", exc_info=True)
                         
                     sender_task.cancel()
+                    try:
+                        await sender_task
+                    except asyncio.CancelledError:
+                        pass
                     
                 if self.stop_event.is_set():
                     break
@@ -488,4 +504,97 @@ Rules:
             pass
         except Exception as e:
             logger.error(f"Error in sender loop: {e}", exc_info=True)
+
+    async def handle_adjust_camera(self, command, fc_id):
+        """
+        Takes a textual command from Gemini Voice AI, analyzes the latest
+        camera frame using Gemini 1.5 Pro, and sends a command to the hardware WebSocket.
+        """
+        logger.info(f"Handling adjust_camera: {command}")
+        result_msg = "Command executed successfully and sent to hardware."
+        
+        try:
+            if not getattr(self, 'latest_frame_b64', None):
+                logger.warning("No camera frame available for panning inference.")
+                result_msg = "No camera frame available to execute the command."
+            else:
+                # Initialize Gemini 1.5 Pro client
+                api_key = os.environ.get("GOOGLE_API_KEY") or getattr(settings, "GOOGLE_API_KEY", None)
+                client = genai.Client(api_key=api_key)
+                
+                system_instruction = '''You are a CarePal hardware controller. 
+You are given the latest camera frame and a textual command from a voice assistant (e.g., 'Pan left', 'Patient not visible', 'User not centered').
+Determine the optimal pan movement for the camera motor to fulfill the command and keep the patient in view.
+Return ONLY a JSON object exactly like this:
+{
+    "type": "set_pan_position",
+    "mode": "delta",
+    "value": <INT>
+}
+Use "mode": "delta", with "value" in degrees. Negative means move right, positive means move left.
+Typical magnitudes are 10 to 30 degrees. Do not include markdown formatting.'''
+                
+                image_bytes = base64.b64decode(self.latest_frame_b64)
+                
+                logger.info("Calling Gemini 3 Flash Preview for camera adjustment calculation...")
+                response = await asyncio.to_thread(
+                    client.models.generate_content,
+                    model='gemini-3-flash-preview',
+                    contents=[
+                        types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'),
+                        f"Command: {command}"
+                    ],
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        temperature=0.1
+                    )
+                )
+                
+                # Parse JSON response
+                response_text = response.text.strip()
+                if response_text.startswith('```json'):
+                    response_text = response_text[7:-3].strip()
+                elif response_text.startswith('```'):
+                    response_text = response_text[3:-3].strip()
+                    
+                import json
+                hardware_command = json.loads(response_text)
+                logger.info(f"Generated hardware command: {hardware_command}")
+                
+                # Send to hardware via Django Channels
+                if hasattr(self, 'channel_layer') and self.channel_layer and self.user and self.user.id:
+                    group_name = f"hardware_user_{self.user.id}"
+                    await self.channel_layer.group_send(
+                        group_name,
+                        {
+                            "type": "device.command",
+                            "payload": hardware_command
+                        }
+                    )
+                    logger.info(f"Command sent to {group_name}")
+                else:
+                    logger.warning("No channel layer or user ID found, cannot send hardware command.")
+                    result_msg = "Failed to send command: internal channel or auth error."
+                
+        except Exception as e:
+            logger.error(f"Error executing adjust_camera: {e}")
+            result_msg = f"Error: {str(e)}"
+            
+        finally:
+            if fc_id and self.session:
+                try:
+                    # Send tool response back to the live session
+                    await self.session.send(input=types.LiveClientToolResponse(
+                        function_responses=[
+                            types.FunctionResponse(
+                                id=fc_id,
+                                name="adjust_camera",
+                                response={"result": result_msg}
+                            )
+                        ]
+                    ))
+                    logger.info("Sent tool_response back to Live API")
+                except Exception as e:
+                    logger.error(f"Error sending tool_response: {e}")
+
 
