@@ -515,15 +515,25 @@ Recent conversation history:
                                         self.current_user_text = ""
                                         self.current_ai_text = ""
                                         
-                                # 3. Handle Tool Calls directly on response
+                                # 3. Handle Tool Calls directly on response OR inside model_turn
+                                function_calls = []
                                 tool_call = getattr(response, "tool_call", None)
                                 if tool_call and hasattr(tool_call, "function_calls"):
-                                    for fc in tool_call.function_calls:
-                                        logger.info(f"Function call requested: {fc.name}")
-                                        if fc.name == "adjust_camera":
-                                            command = fc.args.get("command", "") if hasattr(fc, "args") else ""
-                                            fc_id = getattr(fc, 'id', None)
-                                            asyncio.create_task(self.handle_adjust_camera(command, fc_id))
+                                    function_calls.extend(tool_call.function_calls)
+                                
+                                if server_content and getattr(server_content, 'model_turn', None):
+                                    mt = server_content.model_turn
+                                    if hasattr(mt, 'parts'):
+                                        for part in mt.parts:
+                                            if hasattr(part, 'function_call') and part.function_call:
+                                                function_calls.append(part.function_call)
+                                
+                                for fc in function_calls:
+                                    logger.info(f"Function call requested: {fc.name}")
+                                    if fc.name == "adjust_camera":
+                                        command = fc.args.get("command", "") if hasattr(fc, "args") else ""
+                                        fc_id = getattr(fc, 'id', None)
+                                        asyncio.create_task(self.handle_adjust_camera(command, fc_id))
                                             
                             logger.info("Receiver loop finished (turn complete). Re-entering...")
                             if self.stop_event.is_set():
@@ -583,17 +593,19 @@ Recent conversation history:
     async def handle_adjust_camera(self, command, fc_id):
         """
         Takes a textual command from Gemini Voice AI, analyzes the latest
-        camera frame using Gemini 1.5 Pro, and sends a command to the hardware WebSocket.
+        camera frame using Gemini 3 Flash Preview, and sends a command to the hardware WebSocket.
         """
-        logger.info(f"Handling adjust_camera: {command}")
+        logger.info(f"[TOOL EXECUTION START] adjust_camera invoked | Command: '{command}' | Function Call ID: {fc_id}")
         result_msg = "Command executed successfully and sent to hardware."
         
         try:
             if not getattr(self, 'latest_frame_b64', None):
-                logger.warning("No camera frame available for panning inference.")
+                logger.warning("[adjust_camera] No camera frame available in self.latest_frame_b64 to process the command.")
                 result_msg = "No camera frame available to execute the command."
             else:
-                # Initialize Gemini 1.5 Pro client
+                logger.info("[adjust_camera] Found latest camera frame. Preparing to call Gemini 3 Flash Preview.")
+                
+                # Initialize Gemini API client
                 api_key = os.environ.get("GOOGLE_API_KEY") or getattr(settings, "GOOGLE_API_KEY", None)
                 client = genai.Client(api_key=api_key)
                 
@@ -611,7 +623,7 @@ Typical magnitudes are 10 to 30 degrees. Do not include markdown formatting.'''
                 
                 image_bytes = base64.b64decode(self.latest_frame_b64)
                 
-                logger.info("Calling Gemini 3 Flash Preview for camera adjustment calculation...")
+                logger.info(f"[adjust_camera] Calling Gemini with prompt: 'Command: {command}'...")
                 response = await asyncio.to_thread(
                     client.models.generate_content,
                     model='gemini-3-flash-preview',
@@ -625,6 +637,8 @@ Typical magnitudes are 10 to 30 degrees. Do not include markdown formatting.'''
                     )
                 )
                 
+                logger.info(f"[adjust_camera] Received response from Gemini 3 Flash: {repr(response.text)}")
+                
                 # Parse JSON response
                 response_text = response.text.strip()
                 if response_text.startswith('```json'):
@@ -634,11 +648,12 @@ Typical magnitudes are 10 to 30 degrees. Do not include markdown formatting.'''
                     
                 import json
                 hardware_command = json.loads(response_text)
-                logger.info(f"Generated hardware command: {hardware_command}")
+                logger.info(f"[adjust_camera] Parsed hardware command successfully: {hardware_command}")
                 
                 # Send to hardware via Django Channels
                 if hasattr(self, 'channel_layer') and self.channel_layer and self.user and self.user.id:
                     group_name = f"hardware_user_{self.user.id}"
+                    logger.info(f"[adjust_camera] Dispatching payload {hardware_command} to channel group: {group_name}")
                     await self.channel_layer.group_send(
                         group_name,
                         {
@@ -646,20 +661,21 @@ Typical magnitudes are 10 to 30 degrees. Do not include markdown formatting.'''
                             "payload": hardware_command
                         }
                     )
-                    logger.info(f"Command sent to {group_name}")
+                    logger.info(f"[adjust_camera] Payload dispatched successfully to {group_name}.")
                 else:
-                    logger.warning("No channel layer or user ID found, cannot send hardware command.")
+                    logger.error("[adjust_camera] Missing channel layer or user ID. Cannot dispatch hardware command.")
                     result_msg = "Failed to send command: internal channel or auth error."
                 
         except Exception as e:
-            logger.error(f"Error executing adjust_camera: {e}")
+            logger.error(f"[adjust_camera] Exception occurred during execution: {type(e).__name__} - {str(e)}", exc_info=True)
             result_msg = f"Error: {str(e)}"
             
         finally:
             if fc_id and self.session:
                 try:
+                    logger.info(f"[TOOL EXECUTION RETURN] Sending result back to Live API: '{result_msg}' for ID {fc_id}")
                     # Send tool response back to the live session
-                    await self.session.send(input=types.LiveClientToolResponse(
+                    await self.session.send_tool_response(
                         function_responses=[
                             types.FunctionResponse(
                                 id=fc_id,
@@ -667,9 +683,9 @@ Typical magnitudes are 10 to 30 degrees. Do not include markdown formatting.'''
                                 response={"result": result_msg}
                             )
                         ]
-                    ))
-                    logger.info("Sent tool_response back to Live API")
+                    )
+                    logger.info("[TOOL EXECUTION END] tool_response successfully sent to Live API")
                 except Exception as e:
-                    logger.error(f"Error sending tool_response: {e}")
+                    logger.error(f"[adjust_camera] Error sending tool_response back to Voice API: {e}", exc_info=True)
 
 
