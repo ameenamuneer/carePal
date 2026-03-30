@@ -178,6 +178,13 @@ AUTH_USER_MODEL = 'users.User'
 
 ASGI_APPLICATION = 'carepal.asgi.application'
 
+# Channel Layers
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels.layers.InMemoryChannelLayer"
+    }
+}
+
 CORS_ALLOW_ALL_ORIGINS = True  # For development only
 
 CORS_ALLOWED_ORIGINS = [
