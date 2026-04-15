@@ -40,12 +40,9 @@ class QueryAuthMiddleware:
                 scope["user"] = await get_user(user_id)
                 
             except (InvalidToken, TokenError, Exception) as e:
-                # Token is invalid
-                # print(f"JWT Auth Error: {e}")
+                print(f"[WS Auth] JWT validation failed: {e}", flush=True)
                 scope["user"] = AnonymousUser()
         else:
-            # If no token, leave it as is (AuthMiddlewareStack might have set it, or it defaults to Anonymous)
-            # Generally, AuthMiddlewareStack sets scope['user'] to AnonymousUser if session auth fails.
-            pass
+            print(f"[WS Auth] No token in query string for path: {scope.get('path', '?')}", flush=True)
 
         return await self.app(scope, receive, send)

@@ -293,6 +293,11 @@ LOGGING = {
             'level': 'DEBUG',
             'propagate': False,
         },
+        'agent': {
+            'handlers': ['console'],
+            'level': 'DEBUG',
+            'propagate': False,
+        },
     },
 }
 

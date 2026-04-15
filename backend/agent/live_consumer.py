@@ -22,6 +22,7 @@ from patients.models import PatientProfile
 from medications.models import Medication, MedicationSchedule, MedicationAdherence
 from users.models import User
 from agent.models import AgentSession, AgentMessage
+from agent.camera_pan_controller import CameraPanController
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +36,10 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         self.input_queue = asyncio.Queue()
         self.stop_event = asyncio.Event()
         self.session = None
-        
+
         # Get patient context
         self.user = self.scope.get('user')
         if not self.user or not self.user.is_authenticated:
-            # For testing/dev, maybe default to first patient or handle error
-            # For now, we'll try to find a patient profile if user is valid
             pass
 
         try:
@@ -51,7 +50,14 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         except Exception as e:
             logger.error(f"Failed to load Silero VAD: {e}")
             self.vad_model = None
-            
+
+        # Initialise the camera pan controller
+        self.pan_controller = CameraPanController(
+            user_id=getattr(self.user, 'id', None),
+            channel_layer=self.channel_layer,
+        )
+        self.pan_controller.start()
+
         self.task = asyncio.create_task(self.run_gemini_session())
         logger.info(f"Gemini Live WebSocket connected for user: {self.user}")
 
@@ -182,6 +188,8 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
 
     async def disconnect(self, close_code):
         self.stop_event.set()
+        if hasattr(self, 'pan_controller'):
+            self.pan_controller.stop()
         if hasattr(self, 'task'):
             self.task.cancel()
             try:
@@ -267,8 +275,14 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
 
                 elif msg_type_byte == 0x01:
                     b64_image = base64.b64encode(payload_data).decode('utf-8')
-                    # Store latest frame for panning inference
+                    # Store latest frame for manual-override inference
                     self.latest_frame_b64 = b64_image
+                    # Feed raw bytes to the autonomous pan controller
+                    has_ctrl = hasattr(self, 'pan_controller')
+                    print(f"[FRAME] 0x01 received | payload={len(payload_data)}B | has_controller={has_ctrl}", flush=True)
+                    if has_ctrl:
+                        self.pan_controller.process_frame(payload_data)
+                        print(f"[FRAME] process_frame called, _latest_frame is now set={self.pan_controller._latest_frame is not None}", flush=True)
                     await self.input_queue.put({
                         "mime_type": "image/jpeg",
                         "data": b64_image
@@ -356,7 +370,7 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         
         # 2. Build System Instruction
         system_instruction = f"""You are CarePAL, a compassionate AI healthcare assistant for home-bound patients.
-        
+
 Context:
 - Patient Name: {context['name']}
 - Age: {context['age']}
@@ -369,17 +383,32 @@ Active Medications:
 {context['medications']}
 
 Your Capabilities:
-1. You have access to a camera. You can move it left or right to see the patient better. Do not ask confirmation from the user to control the panning, do it as you need to see better or look around.
-2. You can record vital signs if the patient shows you a device or tells you the reading. pan to see a better view of the device if needed.
+1. You have access to a motorised camera that tracks the patient automatically. The camera runs an on-device computer-vision model (YOLOv8n) and has three modes:
+   • tracking (default) – automatically detects and follows the person nearest the frame centre. If no one is detected for a few seconds it switches to "look_around" automatically.
+   • look_around – slowly sweeps left and right until a person is found, then returns to "tracking".
+   • manual_override – you send a plain-English instruction; an orchestrator model interprets it and either switches mode or pans to a specific direction. After 30 seconds the camera reverts to tracking.
+
+2. Camera Manual Override – how it works:
+   Call the 'adjust_camera' tool with a plain-English textual command any time you need to intervene in camera positioning. A larger orchestrator model reads your command together with the current camera image and decides the best action. You do NOT need to specify degrees or JSON – just describe what you want. After 30 seconds the camera automatically returns to face/body tracking mode.
+
+   Example commands you can pass:
+   - "Look around to find the patient" → switches to look_around sweep mode
+   - "Patient is not visible, search for them" → switches to look_around
+   - "Switch to face tracking" → switches back to tracking mode
+   - "Pan left, the patient moved to the left" → pans left by a suitable amount
+   - "Turn right slightly" → pans right
+   - "Track the person on the left side of the frame" → pans to bring them to centre
+
+3. You can record vital signs if the patient shows you a device or tells you a reading. Pan to get a better view of the device if needed.
 
 Rules:
 - Speak clearly and warmly.
+- The camera tracks the patient automatically. Only call 'adjust_camera' when the automated tracking is not keeping up, or when you specifically want to look somewhere.
+- Do NOT call 'adjust_camera' repeatedly for small adjustments – trust the autonomous tracking.
 - If you see a medical device, ask if you should record the reading.
 - If the patient seems distressed, offer to call for help (simulated).
-- Proactively pan the camera to keep the user in center of the view.
-- Use the 'adjust_camera' tool to adjust your view if needed by providing a descriptive textual command (e.g., 'Pan left', 'User not centered', 'look around for the patient').
 - Use the 'record_vital_reading' tool to save health data.
-- Considering that the user is in GMT +5:30, see if there are any medcations to be taked, and check if the user has taken the last medication when you get free time in the conversation..
+- Considering that the user is in GMT +5:30, check if there are any medications to be taken and whether the last dose was taken when you have a free moment in the conversation.
 
 Recent conversation history:
 {recent_messages_str}
@@ -590,102 +619,155 @@ Recent conversation history:
         except Exception as e:
             logger.error(f"Error in sender loop: {e}", exc_info=True)
 
-    async def handle_adjust_camera(self, command, fc_id):
+    async def _send_hardware_pan(self, delta: int):
+        """Send a raw delta pan command directly to the hardware channel group."""
+        if not (hasattr(self, 'channel_layer') and self.channel_layer and self.user and self.user.id):
+            logger.error("[pan] Missing channel_layer or user id – cannot dispatch command")
+            return
+        group_name = f"hardware_user_{self.user.id}"
+        await self.channel_layer.group_send(
+            group_name,
+            {
+                "type": "device.command",
+                "payload": {
+                    "type": "set_pan_position",
+                    "mode": "delta",
+                    "value": int(delta),
+                },
+            },
+        )
+        logger.info(f"[pan] Sent delta={delta} to {group_name}")
+
+    async def handle_adjust_camera(self, command: str, fc_id):
         """
-        Takes a textual command from Gemini Voice AI, analyzes the latest
-        camera frame using Gemini 3 Flash Preview, and sends a command to the hardware WebSocket.
+        Manual-override entry point called when the Live AI invokes 'adjust_camera'.
+
+        Passes the command + current frame to an orchestrator model which decides:
+          • switch_mode  – change the pan controller to tracking or look_around
+          • pan          – send an immediate delta pan and enter manual_override for 30s
+
+        After 30 seconds the pan controller automatically reverts to tracking.
         """
-        logger.info(f"[TOOL EXECUTION START] adjust_camera invoked | Command: '{command}' | Function Call ID: {fc_id}")
-        result_msg = "Command executed successfully and sent to hardware."
-        
+        logger.info(f"[adjust_camera] START | command='{command}' | fc_id={fc_id}")
+        result_msg = "Command executed."
+
         try:
-            if not getattr(self, 'latest_frame_b64', None):
-                logger.warning("[adjust_camera] No camera frame available in self.latest_frame_b64 to process the command.")
-                result_msg = "No camera frame available to execute the command."
-            else:
-                logger.info("[adjust_camera] Found latest camera frame. Preparing to call Gemini 3 Flash Preview.")
-                
-                # Initialize Gemini API client
-                api_key = os.environ.get("GOOGLE_API_KEY") or getattr(settings, "GOOGLE_API_KEY", None)
-                client = genai.Client(api_key=api_key)
-                
-                system_instruction = '''You are a CarePal hardware controller. 
-You are given the latest camera frame and a textual command from a voice assistant (e.g., 'Pan left', 'Patient not visible', 'User not centered').
-Determine the optimal pan movement for the camera motor to fulfill the command and keep the patient in view.
-Return ONLY a JSON object exactly like this:
-{
-    "type": "set_pan_position",
-    "mode": "delta",
-    "value": <INT>
-}
-Use "mode": "delta", with "value" in degrees. Negative means move right, positive means move left.
-Typical magnitudes are 10 to 30 degrees. Do not include markdown formatting.'''
-                
+            api_key = os.environ.get("GOOGLE_API_KEY") or getattr(settings, "GOOGLE_API_KEY", None)
+            client = genai.Client(
+                api_key=api_key,
+                http_options={"api_version": "v1beta"},
+            )
+
+            # System instruction embedded as first user turn to avoid SDK/API
+            # version mismatches with the systemInstruction field.
+            orchestrator_system = """You are the CarePal camera-control orchestrator.
+The live AI assistant has sent a plain-English command about the camera.
+The camera system has three modes:
+  - "tracking"        : computer-vision face/body tracking (default)
+  - "look_around"     : slow left/right sweep searching for a person
+  - "manual_override" : a one-off pan command; tracking resumes after 30 s
+
+Given the command (and the current camera frame when available), choose the
+best action and return ONLY a JSON object – no markdown, no extra text.
+
+Possible response shapes:
+
+  Switch mode:
+    {"action": "switch_mode", "mode": "tracking"}
+    {"action": "switch_mode", "mode": "look_around"}
+
+  Immediate pan (also activates manual_override for 30 s):
+    {"action": "pan", "delta": <INT>}
+    Positive delta = pan right. Negative delta = pan left. Range ±10 … ±60.
+
+Decision guide:
+  "look around / find patient / patient not visible"        → switch_mode look_around
+  "switch to face tracking / start tracking"               → switch_mode tracking
+  "turn left / pan left / move left [slightly/a lot]"      → pan -15 … -40
+  "turn right / pan right / move right [slightly/a lot]"   → pan +15 … +40
+  "track person on the left"                               → pan -20
+  "track person on the right"                              → pan +20
+  Ambiguous with frame available → inspect the frame and decide.
+
+Respond with ONLY the JSON object, nothing else."""
+
+            # Build contents: system prompt first, then optional image, then command
+            if getattr(self, 'latest_frame_b64', None):
                 image_bytes = base64.b64decode(self.latest_frame_b64)
-                
-                logger.info(f"[adjust_camera] Calling Gemini with prompt: 'Command: {command}'...")
-                response = await asyncio.to_thread(
-                    client.models.generate_content,
-                    model='gemini-3-flash-preview',
-                    contents=[
+                contents = [
+                    types.Content(role="user", parts=[
+                        types.Part(text=orchestrator_system),
                         types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'),
-                        f"Command: {command}"
-                    ],
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        temperature=0.1
-                    )
-                )
-                
-                logger.info(f"[adjust_camera] Received response from Gemini 3 Flash: {repr(response.text)}")
-                
-                # Parse JSON response
-                response_text = response.text.strip()
-                if response_text.startswith('```json'):
-                    response_text = response_text[7:-3].strip()
-                elif response_text.startswith('```'):
-                    response_text = response_text[3:-3].strip()
-                    
-                import json
-                hardware_command = json.loads(response_text)
-                logger.info(f"[adjust_camera] Parsed hardware command successfully: {hardware_command}")
-                
-                # Send to hardware via Django Channels
-                if hasattr(self, 'channel_layer') and self.channel_layer and self.user and self.user.id:
-                    group_name = f"hardware_user_{self.user.id}"
-                    logger.info(f"[adjust_camera] Dispatching payload {hardware_command} to channel group: {group_name}")
-                    await self.channel_layer.group_send(
-                        group_name,
-                        {
-                            "type": "device.command",
-                            "payload": hardware_command
-                        }
-                    )
-                    logger.info(f"[adjust_camera] Payload dispatched successfully to {group_name}.")
+                        types.Part(text=f"Command: {command}"),
+                    ])
+                ]
+            else:
+                contents = [
+                    types.Content(role="user", parts=[
+                        types.Part(text=orchestrator_system),
+                        types.Part(text=f"Command: {command}"),
+                    ])
+                ]
+
+            logger.info(f"[adjust_camera] Calling orchestrator model with command='{command}'")
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model='gemini-2.5-flash',
+                contents=contents,
+                config=types.GenerateContentConfig(temperature=0.1),
+            )
+
+            response_text = response.text.strip()
+            # Strip any accidental markdown fences
+            if response_text.startswith('```'):
+                response_text = response_text.split('\n', 1)[-1].rsplit('```', 1)[0].strip()
+
+            logger.info(f"[adjust_camera] Orchestrator response: {response_text}")
+            action = json.loads(response_text)
+
+            controller = getattr(self, 'pan_controller', None)
+            act = action.get('action')
+
+            if act == 'switch_mode':
+                mode = action.get('mode', 'tracking')
+                if controller:
+                    controller.set_mode(mode)
+                result_msg = f"Switched camera to '{mode}' mode."
+                logger.info(f"[adjust_camera] Mode switched to '{mode}'")
+
+            elif act == 'pan':
+                delta = int(action.get('delta', 0))
+                if delta != 0:
+                    if controller:
+                        controller.enter_manual_override()
+                    await self._send_hardware_pan(delta)
+                    result_msg = f"Panned camera by {delta}° (manual override active for 30 s)."
                 else:
-                    logger.error("[adjust_camera] Missing channel layer or user ID. Cannot dispatch hardware command.")
-                    result_msg = "Failed to send command: internal channel or auth error."
-                
-        except Exception as e:
-            logger.error(f"[adjust_camera] Exception occurred during execution: {type(e).__name__} - {str(e)}", exc_info=True)
-            result_msg = f"Error: {str(e)}"
-            
+                    result_msg = "No pan movement required."
+                logger.info(f"[adjust_camera] Panned delta={delta}")
+
+            else:
+                logger.warning(f"[adjust_camera] Unknown orchestrator action: {act}")
+                result_msg = "Orchestrator returned an unrecognised action."
+
+        except Exception as exc:
+            logger.error(f"[adjust_camera] Error: {exc}", exc_info=True)
+            result_msg = f"Camera adjustment error: {exc}"
+
         finally:
             if fc_id and self.session:
                 try:
-                    logger.info(f"[TOOL EXECUTION RETURN] Sending result back to Live API: '{result_msg}' for ID {fc_id}")
-                    # Send tool response back to the live session
                     await self.session.send_tool_response(
                         function_responses=[
                             types.FunctionResponse(
                                 id=fc_id,
                                 name="adjust_camera",
-                                response={"result": result_msg}
+                                response={"result": result_msg},
                             )
                         ]
                     )
-                    logger.info("[TOOL EXECUTION END] tool_response successfully sent to Live API")
-                except Exception as e:
-                    logger.error(f"[adjust_camera] Error sending tool_response back to Voice API: {e}", exc_info=True)
+                    logger.info(f"[adjust_camera] Tool response sent: {result_msg}")
+                except Exception as exc:
+                    logger.error(f"[adjust_camera] Failed to send tool response: {exc}", exc_info=True)
 
 

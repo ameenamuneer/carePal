@@ -33,3 +33,4 @@ silero-vad
 torch
 torchaudio
 onnxruntime
+ultralytics
