@@ -50,9 +50,9 @@ class CameraPanController:
     MODE_MANUAL_OVERRIDE  = "manual_override"
 
     # Tracking
-    FRAME_EDGE_THRESHOLD  = 0.30   # fraction from each edge that triggers a pan
+    FRAME_EDGE_THRESHOLD  = 0.38   # fraction from each edge that triggers a pan
     PAN_STEP_TRACKING     = 12     # degrees per tracking correction
-    PAN_COOLDOWN          = 1.2    # seconds between consecutive tracking pans
+    PAN_COOLDOWN          = 1.3    # seconds between consecutive tracking pans
 
     # Look-around sweep
     PAN_STEP_LOOK_AROUND  = 6      # degrees per sweep step
