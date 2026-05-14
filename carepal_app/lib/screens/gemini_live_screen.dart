@@ -99,6 +99,17 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
       // on Android, which is the prerequisite for hardware AEC to function.
       await FlutterPcmSound.setup(sampleRate: 24000, channelCount: 1);
 
+      // When the playback buffer fully drains the AI has finished speaking.
+      // A 500 ms debounce absorbs brief inter-packet gaps in streamed responses.
+      FlutterPcmSound.setFeedCallback((remainingFrames) {
+        if (remainingFrames == 0 && !_isDisposed) {
+          _speakingTimer?.cancel();
+          _speakingTimer = Timer(const Duration(milliseconds: 500), () {
+            _setSpeaking(false);
+          });
+        }
+      });
+
       // AecRecorder creates AudioRecord with VOICE_COMMUNICATION source and
       // explicitly attaches AcousticEchoCanceler + NoiseSuppressor + AGC
       // to the AudioRecord session ID before recording starts.
@@ -112,26 +123,34 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
     }
   }
 
+  static const double _micGain = 2.5;
+
   void _handleMicData(Uint8List data) {
-    // Compute RMS — read bytes manually to avoid asInt16List alignment crash
-    // (the stream delivers sub-buffer views with non-zero offsetInBytes)
     final len = data.length ~/ 2;
-    if (len > 0) {
-      double sum = 0;
-      for (int i = 0; i < len; i++) {
-        int s = data[i * 2] | (data[i * 2 + 1] << 8); // little-endian PCM16
-        if (s >= 0x8000) s -= 0x10000;
-        final f = s / 32768.0;
-        sum += f * f;
-      }
-      _currentRms = sqrt(sum / len);
+    if (len == 0) return;
+
+    // Compute RMS from raw (pre-gain) samples so orb reflects true room level.
+    // Build gain-boosted buffer for sending in the same pass.
+    double sum = 0;
+    final boosted = Uint8List(len * 2);
+    for (int i = 0; i < len; i++) {
+      int s = data[i * 2] | (data[i * 2 + 1] << 8);
+      if (s >= 0x8000) s -= 0x10000; // to signed
+      final f = s / 32768.0;
+      sum += f * f;
+      // Apply gain and clamp to PCM16 range
+      final boostedS = (s * _micGain).round().clamp(-32768, 32767);
+      final u = boostedS < 0 ? boostedS + 0x10000 : boostedS;
+      boosted[i * 2]     = u & 0xFF;
+      boosted[i * 2 + 1] = (u >> 8) & 0xFF;
     }
+    _currentRms = sqrt(sum / len);
 
     if (!_micOn || !_isConnected) return;
 
     final builder = BytesBuilder(copy: false);
     builder.add(_micBuffer);
-    builder.add(data);
+    builder.add(boosted);
     _micBuffer = builder.takeBytes();
 
     while (_micBuffer.length >= _targetBufferSize) {
@@ -189,8 +208,8 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
           raw.length % 2 == 0 ? raw : raw.sublist(0, raw.length - 1));
       final int16List = aligned.buffer.asInt16List();
       FlutterPcmSound.feed(PcmArrayInt16.fromList(int16List));
+      _speakingTimer?.cancel(); // new audio arriving — cancel any pending drain debounce
       _setSpeaking(true);
-      _rescheduleSpeakingStop();
     } else if (typeByte == 0x03) {
       _interruptAudio();
     } else if (typeByte == 0x02) {
@@ -210,9 +229,11 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
     }
   }
 
+  // Fallback timer used only for text-only responses that carry no audio.
+  // Audio responses are stopped by the PCM buffer-drain callback instead.
   void _rescheduleSpeakingStop() {
     _speakingTimer?.cancel();
-    _speakingTimer = Timer(const Duration(milliseconds: 2500), () {
+    _speakingTimer = Timer(const Duration(seconds: 5), () {
       _setSpeaking(false);
     });
   }
