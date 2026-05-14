@@ -6,6 +6,7 @@ import 'dart:ui' show ImageFilter;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -43,7 +44,7 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
   CameraController? _cameraController;
   final BleServoService _bleServoService = BleServoService();
   DateTime _lastFrameTime = DateTime.now();
-  final Duration _frameInterval = const Duration(seconds: 1);
+  final Duration _frameInterval = const Duration(milliseconds: 1500);
   bool _isProcessingFrame = false;
   bool _camVisible = false;
 
@@ -274,6 +275,36 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
     }
   }
 
+  // Returns the clockwise degrees needed to rotate the raw sensor image so it
+  // appears upright for the current device orientation.
+  //
+  // Standard Android formula:
+  //   front: (sensorOrientation + deviceDeg) % 360
+  //   back:  (sensorOrientation - deviceDeg + 360) % 360
+  int _computeImageRotation() {
+    final camera = _cameraController!.description;
+    final deviceOrientation = _cameraController!.value.deviceOrientation;
+
+    // Clockwise degrees the device has been rotated from portraitUp
+    int deviceDeg;
+    if (deviceOrientation == DeviceOrientation.landscapeLeft) {
+      deviceDeg = 90;
+    } else if (deviceOrientation == DeviceOrientation.portraitDown) {
+      deviceDeg = 180;
+    } else if (deviceOrientation == DeviceOrientation.landscapeRight) {
+      deviceDeg = 270;
+    } else {
+      deviceDeg = 0; // portraitUp
+    }
+
+    final int sensor = camera.sensorOrientation;
+    if (camera.lensDirection == CameraLensDirection.front) {
+      return (sensor + deviceDeg) % 360;
+    } else {
+      return (sensor - deviceDeg + 360) % 360;
+    }
+  }
+
   Future<void> _processCameraFrame(CameraImage image) async {
     if (_isProcessingFrame || !_isConnected || _isDisposed) return;
     final now = DateTime.now();
@@ -286,6 +317,7 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
         strides: image.planes.map((p) => p.bytesPerRow).toList(),
         width: image.width,
         height: image.height,
+        rotation: _computeImageRotation(),
       );
       final jpeg = await compute(convertYUV420toJPEG, req);
       if (jpeg != null && !_isDisposed && _channel != null) {
@@ -436,11 +468,14 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
                 child: AnimatedScale(
                   scale: _camVisible ? 1.0 : 0.88,
                   duration: const Duration(milliseconds: 350),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(14),
-                    child: SizedBox(
-                      width: 148,
-                      height: 110,
+                  // ConstrainedBox gives loose constraints (max 140×140) so
+                  // CameraPreview's internal AspectRatio can size itself
+                  // correctly for the current orientation without stretching.
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(
+                        maxWidth: 140, maxHeight: 140),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(14),
                       child: CameraPreview(_cameraController!),
                     ),
                   ),
@@ -797,11 +832,13 @@ class YuvConvertRequest {
   final List<int> strides;
   final int width;
   final int height;
+  final int rotation; // clockwise degrees to apply before encoding
   YuvConvertRequest({
     required this.planes,
     required this.strides,
     required this.width,
     required this.height,
+    this.rotation = 0,
   });
 }
 
@@ -810,7 +847,7 @@ Uint8List? convertYUV420toJPEG(YuvConvertRequest req) {
     const int step = 2;
     final int newWidth = req.width ~/ step;
     final int newHeight = req.height ~/ step;
-    final image = img.Image(width: newWidth, height: newHeight);
+    var image = img.Image(width: newWidth, height: newHeight);
 
     final yPlane = req.planes[0];
     final uPlane = req.planes[1];
@@ -841,6 +878,11 @@ Uint8List? convertYUV420toJPEG(YuvConvertRequest req) {
         image.setPixelRgb(x, y, r, g, b);
       }
     }
+
+    if (req.rotation != 0) {
+      image = img.copyRotate(image, angle: req.rotation);
+    }
+
     return img.encodeJpg(image, quality: 50);
   } catch (e) {
     return null;
