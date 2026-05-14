@@ -51,12 +51,11 @@ dependencies:
   url_launcher: ^6.3.2
   permission_handler: ^11.3.0
   camera: ^0.10.5
-  record: ^5.2.0
   flutter_pcm_sound:
     path: plugins/flutter_pcm_sound
   image: ^4.1.7
-  audio_session: ^0.1.25
   device_info_plus: ^11.1.1
+  wakelock_plus: ^1.1.2
 
 dev_dependencies:
   flutter_test:
@@ -111,5 +110,3 @@ flutter:
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
   
-dependency_overrides:
-  record_linux: ^1.2.0

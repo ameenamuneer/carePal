@@ -10,13 +10,12 @@ import 'package:camera/camera.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/io.dart';
-import 'package:record/record.dart';
 import 'package:flutter_pcm_sound/flutter_pcm_sound.dart';
-import 'package:audio_session/audio_session.dart';
 import 'package:image/image.dart' as img;
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../services/api_service.dart';
 import '../services/ble_servo_service.dart';
+import '../services/aec_recorder.dart';
 
 class GeminiLiveScreen extends StatefulWidget {
   const GeminiLiveScreen({Key? key}) : super(key: key);
@@ -33,9 +32,8 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
   bool _isDisposed = false;
 
   // --- Audio ---
-  final AudioRecorder _audioRecorder = AudioRecorder();
+  final AecRecorder _aecRecorder = AecRecorder();
   StreamSubscription<Uint8List>? _audioSubscription;
-  static const int _sampleRate = 16000;
   static const int _targetBufferSize = 8192;
   Uint8List _micBuffer = Uint8List(0);
   bool _micOn = true;
@@ -97,40 +95,18 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
 
   Future<void> _initAudioSystem() async {
     try {
+      // FlutterPcmSound.setup sets MODE_IN_COMMUNICATION and USAGE_VOICE_COMMUNICATION
+      // on Android, which is the prerequisite for hardware AEC to function.
       await FlutterPcmSound.setup(sampleRate: 24000, channelCount: 1);
 
-      final session = await AudioSession.instance;
-      await session.configure(
-        AudioSessionConfiguration(
-          avAudioSessionCategory: AVAudioSessionCategory.playAndRecord,
-          avAudioSessionCategoryOptions:
-              AVAudioSessionCategoryOptions.allowBluetooth |
-              AVAudioSessionCategoryOptions.defaultToSpeaker,
-          avAudioSessionMode: AVAudioSessionMode.voiceChat,
-          androidAudioAttributes: const AndroidAudioAttributes(
-            contentType: AndroidAudioContentType.speech,
-            usage: AndroidAudioUsage.voiceCommunication,
-          ),
-          androidAudioFocusGainType: AndroidAudioFocusGainType.gain,
-        ),
-      );
-
-      if (await _audioRecorder.hasPermission()) {
-        final stream = await _audioRecorder.startStream(
-          const RecordConfig(
-            encoder: AudioEncoder.pcm16bits,
-            sampleRate: _sampleRate,
-            numChannels: 1,
-            androidConfig: AndroidRecordConfig(
-              audioSource: AndroidAudioSource.voiceCommunication,
-            ),
-          ),
-        );
-        _audioSubscription = stream.listen((data) {
-          if (_isDisposed) return;
-          _handleMicData(data);
-        });
-      }
+      // AecRecorder creates AudioRecord with VOICE_COMMUNICATION source and
+      // explicitly attaches AcousticEchoCanceler + NoiseSuppressor + AGC
+      // to the AudioRecord session ID before recording starts.
+      await _aecRecorder.start();
+      _audioSubscription = _aecRecorder.stream.listen((data) {
+        if (_isDisposed) return;
+        _handleMicData(data);
+      });
     } catch (e) {
       debugPrint('Audio init error: $e');
     }
@@ -319,7 +295,7 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
     _isConnected = false;
     _ticker.dispose();
     _audioSubscription?.cancel();
-    _audioRecorder.stop();
+    _aecRecorder.dispose();
     FlutterPcmSound.release();
     _cameraController?.dispose();
     _channel?.sink.close(1000);
