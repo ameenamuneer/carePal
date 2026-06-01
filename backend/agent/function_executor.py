@@ -403,29 +403,62 @@ class FunctionExecutor:
             }
     
     def _log_patient_activity(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Log patient activity"""
-        # This could be stored in a new Activity model or in agent event logs
-        from .models import AgentEventLog
-        
+        """Log patient activity to PatientActivityLog with current vitals snapshot"""
+        from .models import PatientActivityLog
+        from vitals.models import VitalReading
+
         try:
-            event = AgentEventLog.objects.create(
+            # Resolve observed_at — use patient-mentioned time or now
+            observed_at_raw = params.get('observed_at')
+            if observed_at_raw:
+                try:
+                    from dateutil import parser as dateutil_parser
+                    observed_at = dateutil_parser.parse(observed_at_raw)
+                    if timezone.is_naive(observed_at):
+                        observed_at = timezone.make_aware(observed_at)
+                except Exception:
+                    observed_at = timezone.now()
+            else:
+                observed_at = timezone.now()
+
+            # Snapshot the latest vitals for context
+            vitals_snapshot = {}
+            try:
+                recent_readings = (
+                    VitalReading.objects
+                    .filter(patient=self.patient, is_deleted=False)
+                    .select_related('vital_type')
+                    .order_by('vital_type_id', '-measured_at')
+                    .distinct('vital_type_id')
+                )
+                for r in recent_readings:
+                    vitals_snapshot[r.vital_type.code] = {
+                        'display': r.get_display_value(),
+                        'measured_at': r.measured_at.isoformat(),
+                        'unit': r.vital_type.unit,
+                    }
+            except Exception as ve:
+                logger.warning(f"Could not snapshot vitals: {ve}")
+
+            log_entry = PatientActivityLog.objects.create(
                 patient=self.patient,
-                event_type='MESSAGE_RECEIVED',  # or create new event types
-                event_data={
-                    'activity_type': params['activity_type'],
-                    'description': params['description'],
-                    'severity': params.get('severity'),
-                    'logged_by': 'ai_agent',
-                },
-                severity='INFO' if params.get('severity') != 'SEVERE' else 'WARNING'
+                activity_type=params['activity_type'],
+                description=params['description'],
+                details=params.get('details') or {},
+                observed_at=observed_at,
+                vitals_snapshot=vitals_snapshot,
+                ai_confidence=params.get('ai_confidence', 'MEDIUM'),
+                is_notable=params.get('is_notable', False),
+                notable_reason=params.get('notable_reason', ''),
+                tags=params.get('tags') or [],
             )
-            
+
             return {
                 'success': True,
-                'event_id': event.id,
+                'log_id': log_entry.id,
                 'message': 'Activity logged successfully'
             }
-        
+
         except Exception as e:
             logger.error(f"Error logging activity: {str(e)}")
             return {

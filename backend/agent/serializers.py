@@ -9,7 +9,8 @@ from .models import (
     AgentAction,
     AgentMemory,
     AgentEventLog,
-    AgentCacheEntry
+    AgentCacheEntry,
+    PatientActivityLog,
 )
 
 
@@ -153,6 +154,31 @@ class AgentCacheEntrySerializer(serializers.ModelSerializer):
             'hit_count', 'last_hit_at', 'tokens_saved', 'cost_saved_usd'
         ]
         read_only_fields = ['id', 'created_at', 'hit_count', 'last_hit_at', 'tokens_saved', 'cost_saved_usd']
+
+
+class PatientActivityLogSerializer(serializers.ModelSerializer):
+    """Serializer for patient activity logs captured by the AI"""
+
+    patient_name = serializers.CharField(
+        source='patient.user.get_full_name',
+        read_only=True
+    )
+    session_id = serializers.CharField(
+        source='session.session_id',
+        read_only=True,
+        allow_null=True,
+    )
+
+    class Meta:
+        model = PatientActivityLog
+        fields = [
+            'id', 'patient', 'patient_name', 'session', 'session_id',
+            'activity_type', 'description', 'details',
+            'observed_at', 'logged_at',
+            'vitals_snapshot',
+            'ai_confidence', 'is_notable', 'notable_reason', 'tags',
+        ]
+        read_only_fields = ['id', 'logged_at', 'vitals_snapshot', 'patient_name', 'session_id']
 
 
 # WebSocket Message Formats

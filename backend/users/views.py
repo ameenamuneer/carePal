@@ -2,6 +2,7 @@ from rest_framework import status, generics
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.authentication import BasicAuthentication
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenRefreshView
 from .models import User
@@ -18,6 +19,7 @@ class UserRegistrationView(generics.CreateAPIView):
     POST /api/v1/auth/register/
     """
     queryset = User.objects.all()
+    authentication_classes = []
     permission_classes = [AllowAny]
     serializer_class = UserRegistrationSerializer
     
@@ -44,6 +46,7 @@ class LoginView(APIView):
     User login
     POST /api/v1/auth/login/
     """
+    authentication_classes = []
     permission_classes = [AllowAny]
     
     def post(self, request):

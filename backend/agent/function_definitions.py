@@ -147,23 +147,72 @@ FUNCTION_DECLARATIONS = [
     },
     {
         "name": "log_patient_activity",
-        "description": "Log a patient activity or observation",
+        "description": (
+            "Proactively log any patient activity, behaviour, or health observation you notice "
+            "during natural conversation — without being asked. Use this whenever you observe: "
+            "meals eaten, exercise done or skipped, reported symptoms, mood changes, sleep patterns, "
+            "medication-related comments, social interactions, environmental notes, or any pattern "
+            "that deviates from the patient's usual routine. Log immediately after the observation "
+            "is clear. Do NOT wait for the patient to finish speaking."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
                 "activity_type": {
                     "type": "string",
-                    "description": "Type of activity",
-                    "enum": ["EATING", "SLEEPING", "EXERCISE", "MEDICATION_TAKEN", "SYMPTOM", "OTHER"]
+                    "description": "Category of the activity or observation",
+                    "enum": [
+                        "MEAL", "EXERCISE", "SLEEP", "SYMPTOM", "MEDICATION",
+                        "MOOD", "VITAL_OBSERVATION", "BEHAVIOR", "SOCIAL",
+                        "ENVIRONMENT", "OTHER"
+                    ]
                 },
                 "description": {
                     "type": "string",
-                    "description": "Activity description"
+                    "description": (
+                        "A clear, timestamped natural-language log entry. "
+                        "Examples: 'Patient had lunch at 2:30 pm', "
+                        "'Reported dizziness when standing up', "
+                        "'Did not go for the usual morning walk today'."
+                    )
                 },
-                "severity": {
+                "details": {
+                    "type": "object",
+                    "description": (
+                        "Optional structured details. For MEAL: {meal_items, appetite}. "
+                        "For SYMPTOM: {symptom_name, severity, duration, body_part}. "
+                        "For EXERCISE: {activity_name, duration_minutes, intensity}. "
+                        "For SLEEP: {hours_slept, quality}. "
+                        "For MOOD: {mood_description, energy_level}."
+                    )
+                },
+                "observed_at": {
                     "type": "string",
-                    "description": "For symptoms, how severe",
-                    "enum": ["MILD", "MODERATE", "SEVERE"]
+                    "description": (
+                        "ISO-8601 datetime when the activity occurred, if the patient mentioned "
+                        "a specific time (e.g. '2:30 pm'). Leave blank to default to now."
+                    )
+                },
+                "is_notable": {
+                    "type": "boolean",
+                    "description": (
+                        "Set true if this deviates from the patient's usual pattern, "
+                        "is clinically significant, or warrants caregiver attention."
+                    )
+                },
+                "notable_reason": {
+                    "type": "string",
+                    "description": "Explain why it is notable (only when is_notable is true)."
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Short keyword tags for easy filtering (e.g. ['dizziness', 'skipped_walk'])."
+                },
+                "ai_confidence": {
+                    "type": "string",
+                    "description": "How confident you are in this observation.",
+                    "enum": ["HIGH", "MEDIUM", "LOW"]
                 }
             },
             "required": ["activity_type", "description"]

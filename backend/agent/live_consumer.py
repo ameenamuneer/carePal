@@ -410,6 +410,20 @@ Rules:
 - Use the 'record_vital_reading' tool to save health data.
 - Considering that the user is in GMT +5:30, check if there are any medications to be taken and whether the last dose was taken when you have a free moment in the conversation.
 
+Activity Logging (IMPORTANT):
+- You MUST silently call 'log_patient_activity' whenever you observe ANY of the following during conversation — without prompting the patient and without mentioning that you are logging:
+  • Patient mentions eating a meal or snack (activity_type: MEAL)
+  • Patient mentions any physical activity or confirms they did/skipped exercise (activity_type: EXERCISE)
+  • Patient reports a symptom — pain, dizziness, nausea, shortness of breath, fatigue, etc. (activity_type: SYMPTOM)
+  • Patient mentions how they slept (activity_type: SLEEP)
+  • Patient mentions taking or skipping a medication (activity_type: MEDICATION)
+  • Patient expresses an emotional state — anxious, happy, low, stressed (activity_type: MOOD)
+  • You visually observe something significant via the camera (activity_type: VITAL_OBSERVATION or BEHAVIOR)
+  • Any notable deviation from the patient's known routine (set is_notable: true and explain in notable_reason)
+- Write the description in third-person past tense as a clinical log entry: "Patient had lunch at 2:30 pm."
+- Include the actual time in observed_at if the patient mentions it.
+- Do NOT skip logging because the observation seems minor — caregivers and clinicians rely on this log.
+
 Recent conversation history:
 {recent_messages_str}
 """
@@ -458,7 +472,57 @@ Recent conversation history:
                             },
                             required=["vital_type"]
                         )
-                    )
+                    ),
+                    types.FunctionDeclaration(
+                        name="log_patient_activity",
+                        description=(
+                            "Silently log any patient activity, behaviour, or health observation "
+                            "noticed during natural conversation. Use proactively — without being asked — "
+                            "whenever you observe: meals eaten, exercise done or skipped, symptoms "
+                            "reported, mood changes, sleep comments, medication remarks, or any "
+                            "pattern that deviates from the patient's usual routine. "
+                            "Call this in the background; do not interrupt the conversation flow."
+                        ),
+                        parameters=types.Schema(
+                            type="OBJECT",
+                            properties={
+                                "activity_type": types.Schema(
+                                    type="STRING",
+                                    description="Category: MEAL | EXERCISE | SLEEP | SYMPTOM | MEDICATION | MOOD | VITAL_OBSERVATION | BEHAVIOR | SOCIAL | ENVIRONMENT | OTHER"
+                                ),
+                                "description": types.Schema(
+                                    type="STRING",
+                                    description="Clear natural-language log entry, e.g. 'Patient had lunch at 2:30 pm', 'Reported dizziness when standing up'."
+                                ),
+                                "details": types.Schema(
+                                    type="OBJECT",
+                                    description="Structured extras. MEAL→{meal_items,appetite}. SYMPTOM→{symptom_name,severity,duration,body_part}. EXERCISE→{activity_name,duration_minutes,intensity}. SLEEP→{hours_slept,quality}. MOOD→{mood_description,energy_level}."
+                                ),
+                                "observed_at": types.Schema(
+                                    type="STRING",
+                                    description="ISO-8601 datetime when the activity occurred if patient mentioned a specific time. Omit to default to now."
+                                ),
+                                "is_notable": types.Schema(
+                                    type="BOOLEAN",
+                                    description="True if this deviates from the patient's usual pattern or warrants caregiver attention."
+                                ),
+                                "notable_reason": types.Schema(
+                                    type="STRING",
+                                    description="Why it is notable (only when is_notable is true)."
+                                ),
+                                "tags": types.Schema(
+                                    type="ARRAY",
+                                    items=types.Schema(type="STRING"),
+                                    description="Short keyword tags, e.g. ['dizziness','skipped_walk']."
+                                ),
+                                "ai_confidence": types.Schema(
+                                    type="STRING",
+                                    description="Confidence in this observation: HIGH | MEDIUM | LOW"
+                                )
+                            },
+                            required=["activity_type", "description"]
+                        )
+                    ),
                 ]
             )
         ]
@@ -559,10 +623,15 @@ Recent conversation history:
                                 
                                 for fc in function_calls:
                                     logger.info(f"Function call requested: {fc.name}")
+                                    fc_args = dict(fc.args) if hasattr(fc, "args") and fc.args else {}
+                                    fc_id = getattr(fc, 'id', None)
                                     if fc.name == "adjust_camera":
-                                        command = fc.args.get("command", "") if hasattr(fc, "args") else ""
-                                        fc_id = getattr(fc, 'id', None)
+                                        command = fc_args.get("command", "")
                                         asyncio.create_task(self.handle_adjust_camera(command, fc_id))
+                                    elif fc.name == "record_vital_reading":
+                                        asyncio.create_task(self.handle_record_vital(fc_args, fc_id))
+                                    elif fc.name == "log_patient_activity":
+                                        asyncio.create_task(self.handle_log_activity(fc_args, fc_id))
                                             
                             logger.info("Receiver loop finished (turn complete). Re-entering...")
                             if self.stop_event.is_set():
@@ -597,6 +666,115 @@ Recent conversation history:
                 await asyncio.sleep(2)
         
         logger.info("Exiting run_gemini_session")
+
+    @database_sync_to_async
+    def _save_activity_log(self, params: dict) -> dict:
+        """Persist a PatientActivityLog entry with a current vitals snapshot."""
+        from .models import PatientActivityLog
+        from vitals.models import VitalReading
+
+        try:
+            patient = PatientProfile.objects.filter(user=self.user).first()
+            if not patient:
+                return {"success": False, "error": "No patient profile found"}
+
+            # Resolve observed_at
+            observed_at_raw = params.get('observed_at')
+            if observed_at_raw:
+                try:
+                    from dateutil import parser as dateutil_parser
+                    observed_at = dateutil_parser.parse(observed_at_raw)
+                    if timezone.is_naive(observed_at):
+                        observed_at = timezone.make_aware(observed_at)
+                except Exception:
+                    observed_at = timezone.now()
+            else:
+                observed_at = timezone.now()
+
+            # Vitals snapshot — latest reading per type
+            vitals_snapshot = {}
+            try:
+                seen = set()
+                for r in (
+                    VitalReading.objects
+                    .filter(patient=patient, is_deleted=False)
+                    .select_related('vital_type')
+                    .order_by('-measured_at')
+                ):
+                    code = r.vital_type.code
+                    if code not in seen:
+                        seen.add(code)
+                        vitals_snapshot[code] = {
+                            'display': r.get_display_value(),
+                            'measured_at': r.measured_at.isoformat(),
+                            'unit': r.vital_type.unit,
+                        }
+                    if len(seen) >= 10:
+                        break
+            except Exception as ve:
+                logger.warning(f"Could not snapshot vitals for activity log: {ve}")
+
+            # Attach session if available
+            session = getattr(self, 'db_session', None)
+
+            log_entry = PatientActivityLog.objects.create(
+                patient=patient,
+                session=session,
+                activity_type=params.get('activity_type', 'OTHER'),
+                description=params.get('description', ''),
+                details=params.get('details') or {},
+                observed_at=observed_at,
+                vitals_snapshot=vitals_snapshot,
+                ai_confidence=params.get('ai_confidence', 'MEDIUM'),
+                is_notable=bool(params.get('is_notable', False)),
+                notable_reason=params.get('notable_reason', ''),
+                tags=params.get('tags') or [],
+            )
+            logger.info(f"PatientActivityLog created: id={log_entry.id} type={log_entry.activity_type}")
+            return {"success": True, "log_id": log_entry.id}
+
+        except Exception as e:
+            logger.error(f"Error saving activity log: {e}", exc_info=True)
+            return {"success": False, "error": str(e)}
+
+    async def handle_record_vital(self, args: dict, fc_id):
+        """Handle record_vital_reading tool call."""
+        result = await self.save_vital_reading(
+            vital_type_str=args.get('vital_type', ''),
+            value=args.get('value'),
+            systolic=args.get('systolic'),
+            diastolic=args.get('diastolic'),
+        )
+        if fc_id and self.session:
+            try:
+                await self.session.send_tool_response(
+                    function_responses=[
+                        types.FunctionResponse(
+                            id=fc_id,
+                            name="record_vital_reading",
+                            response=result,
+                        )
+                    ]
+                )
+            except Exception as exc:
+                logger.error(f"[record_vital] Failed to send tool response: {exc}")
+
+    async def handle_log_activity(self, args: dict, fc_id):
+        """Handle log_patient_activity tool call — silent background logging."""
+        result = await self._save_activity_log(args)
+        if fc_id and self.session:
+            try:
+                await self.session.send_tool_response(
+                    function_responses=[
+                        types.FunctionResponse(
+                            id=fc_id,
+                            name="log_patient_activity",
+                            response=result,
+                        )
+                    ]
+                )
+            except Exception as exc:
+                logger.error(f"[log_activity] Failed to send tool response: {exc}")
 
     async def sender_loop(self):
         logger.info("Starting sender loop")

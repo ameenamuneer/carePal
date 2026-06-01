@@ -436,6 +436,98 @@ class AgentEventLog(models.Model):
         return f"{self.event_type} - {self.patient.user.get_full_name()} - {self.timestamp}"
 
 
+class PatientActivityLog(models.Model):
+    """
+    Structured log of patient activities and observations captured by the AI
+    during natural conversation — not from direct enquiry.
+    """
+
+    ACTIVITY_TYPE_CHOICES = [
+        ('MEAL', 'Meal / Eating'),
+        ('EXERCISE', 'Physical Activity / Exercise'),
+        ('SLEEP', 'Sleep / Rest'),
+        ('SYMPTOM', 'Symptom Reported'),
+        ('MEDICATION', 'Medication Related'),
+        ('MOOD', 'Mood / Emotional State'),
+        ('VITAL_OBSERVATION', 'Vital Sign Observation'),
+        ('BEHAVIOR', 'Behavioral Pattern'),
+        ('SOCIAL', 'Social Activity'),
+        ('ENVIRONMENT', 'Environment / Location'),
+        ('OTHER', 'Other'),
+    ]
+
+    CONFIDENCE_CHOICES = [
+        ('HIGH', 'High'),
+        ('MEDIUM', 'Medium'),
+        ('LOW', 'Low'),
+    ]
+
+    patient = models.ForeignKey(
+        PatientProfile,
+        on_delete=models.CASCADE,
+        related_name='activity_logs'
+    )
+    session = models.ForeignKey(
+        AgentSession,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='activity_logs'
+    )
+
+    # Core log fields
+    activity_type = models.CharField(max_length=20, choices=ACTIVITY_TYPE_CHOICES)
+    description = models.TextField(
+        help_text="Natural-language log entry, e.g. 'Patient had lunch at 2:30 pm'"
+    )
+    details = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Structured additional details (meal items, symptom severity, etc.)"
+    )
+
+    # Timing — when the activity actually occurred vs when it was logged
+    observed_at = models.DateTimeField(
+        help_text="When the activity occurred (as reported/observed)"
+    )
+    logged_at = models.DateTimeField(auto_now_add=True)
+
+    # Snapshot of the latest vitals at the time of logging
+    vitals_snapshot = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Patient's most-recent vitals at the moment of logging"
+    )
+
+    # AI meta
+    ai_confidence = models.CharField(
+        max_length=6,
+        choices=CONFIDENCE_CHOICES,
+        default='MEDIUM'
+    )
+    is_notable = models.BooleanField(
+        default=False,
+        help_text="AI flagged this as unusual or worth clinician attention"
+    )
+    notable_reason = models.TextField(blank=True)
+
+    # Free-form tags for filtering (e.g. ["dizziness", "skipped_walk"])
+    tags = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        db_table = 'patient_activity_logs'
+        ordering = ['-observed_at']
+        indexes = [
+            models.Index(fields=['patient', '-observed_at']),
+            models.Index(fields=['activity_type', '-observed_at']),
+            models.Index(fields=['is_notable', '-observed_at']),
+            models.Index(fields=['session']),
+        ]
+
+    def __str__(self):
+        return f"{self.patient.user.get_full_name()} | {self.activity_type} | {self.observed_at:%Y-%m-%d %H:%M}"
+
+
 class AgentCacheEntry(models.Model):
     """
     Cache frequently used responses to reduce API costs
