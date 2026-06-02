@@ -26,6 +26,7 @@ import 'gemini_live_screen.dart';
 import 'web_agent_screen.dart';
 import 'appointments/appointment_list_screen.dart';
 import 'vitals/vitals_detail_screen.dart';
+import 'activity_log_screen.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -267,6 +268,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
             _buildVitalsGridFromProvider(),
             const SizedBox(height: 24),
             _buildMedicationSummary(),
+            const SizedBox(height: 24),
+            _buildActivityLogButton(),
+            const SizedBox(height: 8),
           ],
         ),
       ),
@@ -627,6 +631,66 @@ class _DashboardScreenState extends State<DashboardScreen> {
           style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
         ),
       ],
+    );
+  }
+
+  Widget _buildActivityLogButton() {
+    return GestureDetector(
+      onTap: () {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => const ActivityLogScreen(),
+          ),
+        );
+      },
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 20),
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: AppColors.border, width: 1),
+        ),
+        child: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: AppColors.primaryLighter,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(Icons.history, color: AppColors.primary, size: 22),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Activity Log',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.textPrimary,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'AI-observed health events & notes',
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: AppColors.textSecondary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Icon(Icons.arrow_forward_ios,
+                size: 14, color: AppColors.textTertiary),
+          ],
+        ),
+      ),
     );
   }
 

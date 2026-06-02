@@ -83,6 +83,7 @@ services:
     environment:
       - FLUTTER_WEB_PORT=3000
     privileged: true
+    init: true
     volumes:
       - ./carepal_app:/app
       - gradle_cache:/root/.gradle

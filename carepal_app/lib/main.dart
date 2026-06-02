@@ -11,6 +11,7 @@ import 'providers/family_provider.dart';
 import 'providers/ai_agent_provider.dart';
 import 'providers/profile_provider.dart'; // Import ProfileProvider
 import 'providers/abdm_provider.dart'; // AbdmProvider
+import 'providers/activity_log_provider.dart';
 import 'services/ble_servo_service.dart';
 import 'screens/login_screen.dart';
 import 'screens/dashboard_screen.dart'; // Ensure DashboardScreen is imported for logic or home redirect
@@ -52,6 +53,7 @@ void main() async {
             ChangeNotifierProvider(create: (_) => AIAgentProvider()),
             ChangeNotifierProvider(create: (_) => ProfileProvider()),
             ChangeNotifierProvider(create: (_) => AbdmProvider()),
+            ChangeNotifierProvider(create: (_) => ActivityLogProvider()),
             ChangeNotifierProvider(
               create: (_) {
                 print("📦 [DEBUG] Init BleServoService");

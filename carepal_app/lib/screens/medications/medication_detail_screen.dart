@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:table_calendar/table_calendar.dart';
 import 'package:intl/intl.dart';
-import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import '../../core/app_colors.dart';
 import '../../providers/medication_provider.dart';
 import '../../models/medication.dart';
@@ -103,7 +102,7 @@ class _MedicationDetailScreenState extends State<MedicationDetailScreen> {
               color: Colors.white.withOpacity(0.2),
               shape: BoxShape.circle,
             ),
-            child: Icon(FontAwesomeIcons.pills, color: Colors.white, size: 40),
+            child: Icon(Icons.medication, color: Colors.white, size: 40),
           ),
           const SizedBox(height: 16),
           Text(

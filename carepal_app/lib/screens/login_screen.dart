@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import '../core/app_colors.dart';
 import '../providers/auth_provider.dart';
 import 'register_screen.dart';
@@ -94,7 +93,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     ],
                   ),
                   child: const Icon(
-                    FontAwesomeIcons.heartPulse,
+                    Icons.favorite,
                     color: Colors.white,
                     size: 60,
                   ),
@@ -340,7 +339,7 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                     );
                   },
-                  icon: const Icon(FontAwesomeIcons.userShield),
+                  icon: const Icon(Icons.verified_user),
                   label: const Text('Login with ABHA'),
                   style: OutlinedButton.styleFrom(
                     foregroundColor: AppColors.primary,

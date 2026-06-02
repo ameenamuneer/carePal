@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'profile/abha_registration_screen.dart';
 import 'profile/phr_onboarding_screen.dart';
 import 'login_screen.dart';
@@ -23,7 +22,7 @@ class AdminScreen extends StatelessWidget {
             context,
             title: 'Create Identity',
             subtitle: 'Register new ABHA/CarePal ID',
-            icon: FontAwesomeIcons.userPlus,
+            icon: Icons.person_add,
             color: Colors.green,
             onTap: () {
               Navigator.of(context).push(
@@ -38,7 +37,7 @@ class AdminScreen extends StatelessWidget {
             context,
             title: 'Link Records',
             subtitle: 'Discover and link health records (Requires Login)',
-            icon: FontAwesomeIcons.link,
+            icon: Icons.link,
             color: Colors.blue,
             onTap: () async {
               // Check if logged in
@@ -69,7 +68,7 @@ class AdminScreen extends StatelessWidget {
             context,
             title: 'System Health',
             subtitle: 'Check API Connectivity',
-            icon: FontAwesomeIcons.server,
+            icon: Icons.dns,
             color: Colors.orange,
             onTap: () {
               ScaffoldMessenger.of(context).showSnackBar(
@@ -108,7 +107,7 @@ class AdminScreen extends StatelessWidget {
                   color: color.withOpacity(0.1),
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: FaIcon(icon, color: color, size: 24),
+                child: Icon(icon, color: color, size: 24),
               ),
               const SizedBox(width: 16),
               Expanded(

@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import '../../core/app_colors.dart';
 import '../../providers/medication_provider.dart';
 import '../../widgets/loading_shimmer.dart';
@@ -74,7 +73,7 @@ class _MedicationsScreenState extends State<MedicationsScreen>
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Icon(
-                FontAwesomeIcons.pills,
+                Icons.medication,
                 color: AppColors.primary,
                 size: 20,
               ),
@@ -558,7 +557,7 @@ class _MedicationsScreenState extends State<MedicationsScreen>
                 borderRadius: BorderRadius.circular(16),
               ),
               child: Icon(
-                FontAwesomeIcons.pills,
+                Icons.medication,
                 color: AppColors.primary,
                 size: 24,
               ),

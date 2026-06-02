@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:intl/intl.dart';
 import '../../core/app_colors.dart';
 import '../../providers/medication_provider.dart';
@@ -206,7 +205,7 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                   _buildTextField(
                     controller: _nameController,
                     label: 'Medication Name',
-                    icon: FontAwesomeIcons.pills,
+                    icon: Icons.medication,
                     validator: (v) => v?.isEmpty == true ? 'Required' : null,
                   ),
                   const SizedBox(height: 16),
@@ -216,7 +215,7 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                         child: _buildTextField(
                           controller: _dosageController,
                           label: 'Dosage',
-                          icon: FontAwesomeIcons.prescription,
+                          icon: Icons.science,
                           hint: 'e.g. 500mg',
                           validator: (v) =>
                               v?.isEmpty == true ? 'Required' : null,
