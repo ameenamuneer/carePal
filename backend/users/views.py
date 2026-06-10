@@ -1,17 +1,20 @@
-from rest_framework import status, generics
+from rest_framework import status, generics, viewsets, filters
+from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.authentication import BasicAuthentication
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenRefreshView
-from .models import User
+from .models import User, ClinicalRelationship
 from .serializers import (
     UserRegistrationSerializer,
     LoginSerializer,
     UserSerializer,
-    TokenSerializer
+    TokenSerializer,
+    ClinicalRelationshipSerializer,
 )
+from .permissions import IsDoctor, IsAdmin
 
 class UserRegistrationView(generics.CreateAPIView):
     """
@@ -90,6 +93,72 @@ class UserProfileView(generics.RetrieveUpdateAPIView):
     """
     serializer_class = UserSerializer
     permission_classes = [IsAuthenticated]
-    
+
     def get_object(self):
         return self.request.user
+
+
+class ClinicalRelationshipViewSet(viewsets.ModelViewSet):
+    """
+    Manage doctor–patient links.
+
+    Doctors see only their own relationships.
+    Admins see all.
+    Patients can GET their own (read-only via /my-doctors/).
+    """
+    serializer_class = ClinicalRelationshipSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.user_type == 'DOCTOR':
+            return ClinicalRelationship.objects.filter(doctor=user).select_related(
+                'doctor', 'patient__user'
+            )
+        if user.user_type == 'ADMIN':
+            return ClinicalRelationship.objects.all().select_related(
+                'doctor', 'patient__user'
+            )
+        # PATIENT / FAMILY: read-only via dedicated action
+        return ClinicalRelationship.objects.none()
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        # Doctors create their own relationships; admins can specify the doctor field
+        if user.user_type == 'DOCTOR':
+            serializer.save(doctor=user)
+        else:
+            serializer.save()
+
+    def get_permissions(self):
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [IsAuthenticated(), (IsDoctor() or IsAdmin())]
+        return [IsAuthenticated()]
+
+    @action(detail=False, methods=['get'], url_path='my-doctors')
+    def my_doctors(self, request):
+        """
+        GET /api/v1/auth/clinical-relationships/my-doctors/
+        Patients retrieve all doctors linked to them.
+        """
+        if request.user.user_type != 'PATIENT':
+            return Response({'detail': 'Only patients can use this endpoint.'}, status=403)
+        if not hasattr(request.user, 'patient_profile'):
+            return Response({'detail': 'No patient profile found.'}, status=404)
+        qs = ClinicalRelationship.objects.filter(
+            patient=request.user.patient_profile, is_active=True
+        ).select_related('doctor', 'patient__user')
+        return Response(ClinicalRelationshipSerializer(qs, many=True).data)
+
+    @action(detail=False, methods=['get'], url_path='my-patients')
+    def my_patients(self, request):
+        """
+        GET /api/v1/auth/clinical-relationships/my-patients/
+        Doctors retrieve all patients linked to them.
+        """
+        if request.user.user_type != 'DOCTOR':
+            return Response({'detail': 'Only doctors can use this endpoint.'}, status=403)
+        qs = ClinicalRelationship.objects.filter(
+            doctor=request.user, is_active=True
+        ).select_related('doctor', 'patient__user')
+        return Response(ClinicalRelationshipSerializer(qs, many=True).data)

@@ -44,3 +44,61 @@ class User(AbstractUser):
                 (today.month, today.day) < (self.date_of_birth.month, self.date_of_birth.day)
             )
         return None
+
+
+class ClinicalRelationship(models.Model):
+    """
+    Links a DOCTOR user to the PatientProfiles they are authorised to view/manage.
+    """
+    ROLE_CHOICES = [
+        ('PRIMARY', 'Primary Physician'),
+        ('SPECIALIST', 'Specialist'),
+        ('NURSE', 'Nurse / Paramedic'),
+        ('CONSULTANT', 'Consultant'),
+    ]
+
+    doctor = models.ForeignKey(
+        'users.User',
+        on_delete=models.CASCADE,
+        related_name='clinical_relationships',
+        limit_choices_to={'user_type': 'DOCTOR'},
+    )
+    patient = models.ForeignKey(
+        'patients.PatientProfile',
+        on_delete=models.CASCADE,
+        related_name='clinical_relationships',
+    )
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='PRIMARY')
+
+    # Granular permissions — add new ones here as features expand
+    can_view_vitals = models.BooleanField(default=True)
+    can_view_activity_log = models.BooleanField(default=True)
+    can_view_medications = models.BooleanField(default=True)
+    can_edit_medications = models.BooleanField(default=True)
+    can_view_alerts = models.BooleanField(default=True)
+    can_view_appointments = models.BooleanField(default=True)
+    can_edit_appointments = models.BooleanField(default=True)
+
+    is_active = models.BooleanField(default=True)
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'clinical_relationships'
+        unique_together = ['doctor', 'patient']
+
+    def __str__(self):
+        return f"Dr {self.doctor.get_full_name()} → {self.patient.user.get_full_name()}"
+
+    def has_permission(self, permission):
+        permission_map = {
+            'view_vitals': self.can_view_vitals,
+            'view_activity_log': self.can_view_activity_log,
+            'view_medications': self.can_view_medications,
+            'edit_medications': self.can_edit_medications,
+            'view_alerts': self.can_view_alerts,
+            'view_appointments': self.can_view_appointments,
+            'edit_appointments': self.can_edit_appointments,
+        }
+        return permission_map.get(permission, False)

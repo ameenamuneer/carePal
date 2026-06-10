@@ -52,9 +52,10 @@ class FamilyMember(models.Model):
     # Access control
     access_level = models.CharField(max_length=20, choices=ACCESS_LEVEL_CHOICES, default='BASIC')
     
-    # Permissions
+    # Permissions — add new ones here as features expand
     can_view_vitals = models.BooleanField(default=True)
     can_view_medications = models.BooleanField(default=True)
+    can_view_activity_log = models.BooleanField(default=True)
     can_view_alerts = models.BooleanField(default=True)
     can_view_medical_history = models.BooleanField(default=False)
     can_acknowledge_alerts = models.BooleanField(default=True)
@@ -104,6 +105,7 @@ class FamilyMember(models.Model):
         permission_map = {
             'view_vitals': self.can_view_vitals,
             'view_medications': self.can_view_medications,
+            'view_activity_log': self.can_view_activity_log,
             'view_alerts': self.can_view_alerts,
             'view_medical_history': self.can_view_medical_history,
             'acknowledge_alerts': self.can_acknowledge_alerts,

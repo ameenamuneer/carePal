@@ -40,23 +40,35 @@ class MedicationViewSet(viewsets.ModelViewSet):
     ordering = ['-created_at']
     
     def get_queryset(self):
-        """Filter medications based on user type"""
+        """Filter medications based on user type and per-account permissions."""
         user = self.request.user
-        
+
         if user.user_type == 'PATIENT':
             return Medication.objects.filter(
                 patient__user=user
             ).select_related('patient__user')
+
         elif user.user_type == 'FAMILY':
             from family.models import FamilyMember
+            # Family can view medication schedule only (no editing)
             linked_patients = FamilyMember.objects.filter(
-                user=user
+                user=user, is_active=True, can_view_medications=True
             ).values_list('patient_id', flat=True)
             return Medication.objects.filter(
                 patient_id__in=linked_patients
             ).select_related('patient__user')
+
+        elif user.user_type == 'DOCTOR':
+            from users.models import ClinicalRelationship
+            linked_patients = ClinicalRelationship.objects.filter(
+                doctor=user, is_active=True, can_view_medications=True
+            ).values_list('patient_id', flat=True)
+            return Medication.objects.filter(
+                patient_id__in=linked_patients
+            ).select_related('patient__user')
+
         else:
-            # Healthcare provider or admin
+            # ADMIN
             return Medication.objects.all().select_related('patient__user')
     
     def get_serializer_class(self):
@@ -67,13 +79,40 @@ class MedicationViewSet(viewsets.ModelViewSet):
             return MedicationCreateUpdateSerializer
         return MedicationDetailSerializer
     
+    def _check_edit_permission(self, request):
+        """Return a 403 Response if the user cannot edit medications, else None."""
+        user = request.user
+        if user.user_type == 'FAMILY':
+            return Response(
+                {'detail': 'Family members cannot modify medications.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if user.user_type == 'DOCTOR':
+            # Check per-relationship permission for the patient being targeted
+            patient_id = request.data.get('patient') or request.query_params.get('patient_id')
+            if patient_id:
+                from users.models import ClinicalRelationship
+                allowed = ClinicalRelationship.objects.filter(
+                    doctor=user, patient_id=patient_id,
+                    is_active=True, can_edit_medications=True
+                ).exists()
+                if not allowed:
+                    return Response(
+                        {'detail': 'You do not have edit-medication permission for this patient.'},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+        return None
+
     def create(self, request, *args, **kwargs):
         """
         Create medication and generate initial records
-        
+
         Simplified: Just create today + next 7 days
         Midnight task will handle future days
         """
+        err = self._check_edit_permission(request)
+        if err:
+            return err
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         medication = serializer.save()
@@ -89,6 +128,9 @@ class MedicationViewSet(viewsets.ModelViewSet):
     
     def update(self, request, *args, **kwargs):
         """Update medication and regenerate schedules if needed"""
+        err = self._check_edit_permission(request)
+        if err:
+            return err
         partial = kwargs.pop('partial', False)
         instance = self.get_object()
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
@@ -102,7 +144,14 @@ class MedicationViewSet(viewsets.ModelViewSet):
         
         output_serializer = MedicationDetailSerializer(medication)
         return Response(output_serializer.data)
-    
+
+    def destroy(self, request, *args, **kwargs):
+        """Delete medication — blocked for Family accounts."""
+        err = self._check_edit_permission(request)
+        if err:
+            return err
+        return super().destroy(request, *args, **kwargs)
+
     @action(detail=False, methods=['post'])
     def import_prescription(self, request):
         """

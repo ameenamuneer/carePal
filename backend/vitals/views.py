@@ -38,13 +38,19 @@ class DataSourceViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         user = self.request.user
-        
+
         if user.user_type == 'PATIENT':
             return DataSource.objects.filter(patient__user=user)
         elif user.user_type == 'FAMILY':
             from family.models import FamilyMember
             linked_patients = FamilyMember.objects.filter(
-                user=user
+                user=user, is_active=True, can_view_vitals=True
+            ).values_list('patient_id', flat=True)
+            return DataSource.objects.filter(patient_id__in=linked_patients)
+        elif user.user_type == 'DOCTOR':
+            from users.models import ClinicalRelationship
+            linked_patients = ClinicalRelationship.objects.filter(
+                doctor=user, is_active=True, can_view_vitals=True
             ).values_list('patient_id', flat=True)
             return DataSource.objects.filter(patient_id__in=linked_patients)
         else:
@@ -99,7 +105,13 @@ class VitalReadingViewSet(viewsets.ModelViewSet):
         elif user.user_type == 'FAMILY':
             from family.models import FamilyMember
             linked_patients = FamilyMember.objects.filter(
-                user=user
+                user=user, is_active=True, can_view_vitals=True
+            ).values_list('patient_id', flat=True)
+            queryset = queryset.filter(patient_id__in=linked_patients)
+        elif user.user_type == 'DOCTOR':
+            from users.models import ClinicalRelationship
+            linked_patients = ClinicalRelationship.objects.filter(
+                doctor=user, is_active=True, can_view_vitals=True
             ).values_list('patient_id', flat=True)
             queryset = queryset.filter(patient_id__in=linked_patients)
         

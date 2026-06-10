@@ -16,7 +16,7 @@ class AgentSessionViewSet(viewsets.ModelViewSet):
     ViewSet for AI Agent sessions
     """
     permission_classes = [permissions.IsAuthenticated]
-    
+
     def get_queryset(self):
         user = self.request.user
         # Patients see their own sessions
@@ -24,12 +24,12 @@ class AgentSessionViewSet(viewsets.ModelViewSet):
             return AgentSession.objects.filter(patient=user.patient_profile)
         # Family members see their patients' sessions (TODO: add detailed logic)
         return AgentSession.objects.filter(user=user)
-    
+
     def get_serializer_class(self):
         if self.action == 'list':
             return AgentSessionListSerializer
         return AgentSessionSerializer
-    
+
     @action(detail=True, methods=['post'])
     def end_session(self, request, pk=None):
         """End an active session"""
@@ -43,6 +43,12 @@ class AgentSessionViewSet(viewsets.ModelViewSet):
 class PatientActivityLogViewSet(viewsets.ReadOnlyModelViewSet):
     """
     Read-only endpoint for retrieving AI-observed patient activity logs.
+
+    Access control:
+      - PATIENT  : their own logs
+      - FAMILY   : linked patients where can_view_medical_history=True
+      - DOCTOR   : linked patients where can_view_activity_log=True
+      - ADMIN    : all
 
     Filters:
       ?activity_type=MEAL|EXERCISE|SLEEP|SYMPTOM|MEDICATION|MOOD|BEHAVIOR|...
@@ -61,10 +67,31 @@ class PatientActivityLogViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if hasattr(user, 'patient_profile'):
+
+        if user.user_type == 'PATIENT':
+            if not hasattr(user, 'patient_profile'):
+                return PatientActivityLog.objects.none()
             qs = PatientActivityLog.objects.filter(patient=user.patient_profile)
+
+        elif user.user_type == 'FAMILY':
+            from family.models import FamilyMember
+            allowed_patient_ids = FamilyMember.objects.filter(
+                user=user, is_active=True, can_view_activity_log=True
+            ).values_list('patient_id', flat=True)
+            qs = PatientActivityLog.objects.filter(patient_id__in=allowed_patient_ids)
+
+        elif user.user_type == 'DOCTOR':
+            from users.models import ClinicalRelationship
+            allowed_patient_ids = ClinicalRelationship.objects.filter(
+                doctor=user, is_active=True, can_view_activity_log=True
+            ).values_list('patient_id', flat=True)
+            qs = PatientActivityLog.objects.filter(patient_id__in=allowed_patient_ids)
+
+        elif user.user_type == 'ADMIN':
+            qs = PatientActivityLog.objects.all()
+
         else:
-            qs = PatientActivityLog.objects.filter(patient__user=user)
+            return PatientActivityLog.objects.none()
 
         # Date range filters
         date_from = self.request.query_params.get('date_from')

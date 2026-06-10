@@ -89,3 +89,29 @@ class TokenSerializer(serializers.Serializer):
     access = serializers.CharField()
     refresh = serializers.CharField()
     user = UserSerializer()
+
+
+from .models import ClinicalRelationship
+
+
+class ClinicalRelationshipSerializer(serializers.ModelSerializer):
+    doctor_name = serializers.SerializerMethodField()
+    patient_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ClinicalRelationship
+        fields = [
+            'id', 'doctor', 'doctor_name', 'patient', 'patient_name',
+            'role', 'is_active', 'notes',
+            'can_view_vitals', 'can_view_activity_log', 'can_view_medications',
+            'can_edit_medications', 'can_view_alerts',
+            'can_view_appointments', 'can_edit_appointments',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'doctor_name', 'patient_name']
+
+    def get_doctor_name(self, obj):
+        return obj.doctor.get_full_name()
+
+    def get_patient_name(self, obj):
+        return obj.patient.user.get_full_name()
