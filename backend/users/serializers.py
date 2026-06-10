@@ -108,7 +108,7 @@ class ClinicalRelationshipSerializer(serializers.ModelSerializer):
             'can_view_appointments', 'can_edit_appointments',
             'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'doctor_name', 'patient_name']
+        read_only_fields = ['id', 'doctor', 'created_at', 'updated_at', 'doctor_name', 'patient_name']
 
     def get_doctor_name(self, obj):
         return obj.doctor.get_full_name()

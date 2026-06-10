@@ -1,0 +1,141 @@
+import 'package:dio/dio.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+class ApiService {
+  static final ApiService _instance = ApiService._internal();
+  factory ApiService() => _instance;
+  ApiService._internal();
+
+  late Dio _dio;
+  String? _accessToken;
+  String? _refreshToken;
+
+  static const String baseUrl =
+      'https://valerie-nondesigned-clement.ngrok-free.dev'; // Change for production
+
+  void initialize() {
+    _dio = Dio(
+      BaseOptions(
+        baseUrl: baseUrl,
+        connectTimeout: const Duration(seconds: 30),
+        receiveTimeout: const Duration(seconds: 30),
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+      ),
+    );
+
+    _dio.interceptors.add(
+      InterceptorsWrapper(
+        onRequest: (options, handler) async {
+          if (_accessToken != null) {
+            options.headers['Authorization'] = 'Bearer $_accessToken';
+          }
+          return handler.next(options);
+        },
+        onError: (error, handler) async {
+          if (error.response?.statusCode == 401) {
+            if (await _refreshAccessToken()) {
+              final opts = error.requestOptions;
+              opts.headers['Authorization'] = 'Bearer $_accessToken';
+              final response = await _dio.fetch(opts);
+              return handler.resolve(response);
+            }
+          }
+          return handler.next(error);
+        },
+      ),
+    );
+  }
+
+  Future<bool> _refreshAccessToken() async {
+    try {
+      if (_refreshToken == null) return false;
+
+      final response = await _dio.post(
+        '/api/v1/auth/token/refresh/',
+        data: {'refresh': _refreshToken},
+      );
+
+      _accessToken = response.data['access'];
+      await _saveTokens(_accessToken!, _refreshToken!);
+      return true;
+    } catch (e) {
+      await clearTokens();
+      return false;
+    }
+  }
+
+  Future<void> saveTokens(String accessToken, String refreshToken) async {
+    _accessToken = accessToken;
+    _refreshToken = refreshToken;
+    await _saveTokens(accessToken, refreshToken);
+  }
+
+  Future<void> _saveTokens(String accessToken, String refreshToken) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('access_token', accessToken);
+    await prefs.setString('refresh_token', refreshToken);
+  }
+
+  Future<void> loadTokens() async {
+    final prefs = await SharedPreferences.getInstance();
+    _accessToken = prefs.getString('access_token');
+    _refreshToken = prefs.getString('refresh_token');
+  }
+
+  Future<void> clearTokens() async {
+    _accessToken = null;
+    _refreshToken = null;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('access_token');
+    await prefs.remove('refresh_token');
+  }
+
+  Future<String?> getAccessToken() async {
+    if (_accessToken == null) {
+      await loadTokens();
+    }
+    return _accessToken;
+  }
+
+  Future<String?> getRefreshToken() async {
+    if (_refreshToken == null) {
+      await loadTokens();
+    }
+    return _refreshToken;
+  }
+
+  Future<void> saveAccessToken(String token) async {
+    _accessToken = token;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('access_token', token);
+  }
+
+  bool get hasValidToken => _accessToken != null;
+
+  Future<Response> get(
+    String path, {
+    Map<String, dynamic>? queryParameters,
+    Options? options,
+  }) {
+    return _dio.get(path, queryParameters: queryParameters, options: options);
+  }
+
+  Future<Response> post(String path, {dynamic data, Options? options}) {
+    return _dio.post(path, data: data, options: options);
+  }
+
+  Future<Response> put(String path, {dynamic data, Options? options}) {
+    return _dio.put(path, data: data, options: options);
+  }
+
+  Future<Response> patch(String path, {dynamic data, Options? options}) {
+    return _dio.patch(path, data: data, options: options);
+  }
+
+  Future<Response> delete(String path, {Options? options}) {
+    return _dio.delete(path, options: options);
+  }
+}

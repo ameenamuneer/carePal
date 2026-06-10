@@ -89,6 +89,21 @@ services:
       - gradle_cache:/root/.gradle
       - /dev/bus/usb:/dev/bus/usb
 
+  connect:
+    build: ./carepal_connect
+    ports:
+      - "3001:3001"
+    depends_on:
+      - backend
+    environment:
+      - FLUTTER_WEB_PORT=3001
+    privileged: true
+    init: true
+    volumes:
+      - ./carepal_connect:/app
+      - connect_pub_cache:/root/.pub-cache
+
 volumes:
   postgres_data:
   gradle_cache:
+  connect_pub_cache:
