@@ -157,7 +157,7 @@
         <h3>1. Authentication</h3>
         <div class="form-group">
             <label>Backend API Base URL</label>
-            <input type="text" id="apiBaseUrl" value="https://backend.hellocarepal.com">
+            <input type="text" id="apiBaseUrl">
         </div>
         <div class="row">
             <div style="flex: 1;">
@@ -176,8 +176,7 @@
         <h3>2. Connection Settings</h3>
         <div class="form-group">
             <label for="wsUrl">WebSocket Host URL</label>
-            <input type="text" id="wsUrl" value="wss://backend.hellocarepal.com"
-                placeholder="wss://backend.hellocarepal.com">
+            <input type="text" id="wsUrl">
         </div>
         <div class="form-group">
             <label for="jwtToken">JWT Auth Token</label>
@@ -219,13 +218,22 @@
     </div>
 
     <script>
+        // ── SERVER CONFIG — change host here to switch environments ───────────
+        const SERVER_HOST = 'valerie-nondesigned-clement.ngrok-free.dev';
+        const BASE_URL    = `https://${SERVER_HOST}`;
+        const BASE_WS_URL = `wss://${SERVER_HOST}`;
+        // ─────────────────────────────────────────────────────────────────────
+
         // DOM Elements
         const elApiBase = document.getElementById('apiBaseUrl');
+        elApiBase.value = BASE_URL;
         const elLoginUser = document.getElementById('loginUser');
         const elLoginPass = document.getElementById('loginPass');
         const btnLogin = document.getElementById('btnLogin');
 
         const elWsUrl = document.getElementById('wsUrl');
+        elWsUrl.value = BASE_WS_URL;
+        elWsUrl.placeholder = BASE_WS_URL;
         const elJwtToken = document.getElementById('jwtToken');
         const btnConnect = document.getElementById('btnConnect');
         const btnDisconnect = document.getElementById('btnDisconnect');

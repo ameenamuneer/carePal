@@ -535,7 +535,7 @@
 
         // ── ENTRY ─────────────────────────────────────────────────────────────
         window.startSession = function (token, wsUrl) {
-            connectWs(wsUrl || 'wss://backend.hellocarepal.com', token);
+            connectWs(wsUrl, token);
             setTimeout(startCam, 800);
         };
         (() => {

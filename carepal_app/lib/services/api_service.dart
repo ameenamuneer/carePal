@@ -1,5 +1,6 @@
 import 'package:dio/dio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../core/config.dart';
 
 class ApiService {
   static final ApiService _instance = ApiService._internal();
@@ -10,8 +11,7 @@ class ApiService {
   String? _accessToken;
   String? _refreshToken;
 
-  static const String baseUrl =
-      'https://backend.hellocarepal.com'; // Change for production
+  static const String baseUrl = kBaseUrl;
 
   void initialize() {
     _dio = Dio(

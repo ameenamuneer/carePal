@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import '../core/config.dart';
 import '../services/ai_agent_service.dart';
 import '../services/websocket_service.dart';
 
@@ -6,9 +7,7 @@ class AIAgentProvider with ChangeNotifier {
   final AIAgentService _service = AIAgentService();
   late WebSocketService _webSocketService;
 
-  // Initialize with base URL from environment or constant
-  // Assuming a default for now, ideally passed in or retrieved from config
-  final String _baseWsUrl = 'wss://backend.hellocarepal.com';
+  final String _baseWsUrl = kBaseWsUrl;
 
   int? _sessionId; // Changed to int to match new service
   List<ChatMessage> _messages = [];
