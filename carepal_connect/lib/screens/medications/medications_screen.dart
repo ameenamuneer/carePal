@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
+import 'package:table_calendar/table_calendar.dart';
 import '../../core/app_colors.dart';
 import '../../models/medication.dart';
 import '../../providers/auth_provider.dart';
@@ -18,29 +19,8 @@ class MedicationsScreen extends StatefulWidget {
 }
 
 class _MedicationsScreenState extends State<MedicationsScreen> {
-  final ScrollController _scrollController = ScrollController();
-
-  @override
-  void initState() {
-    super.initState();
-    _scrollController.addListener(_onScroll);
-  }
-
-  @override
-  void dispose() {
-    _scrollController.dispose();
-    super.dispose();
-  }
-
-  void _onScroll() {
-    if (_scrollController.position.pixels >=
-        _scrollController.position.maxScrollExtent - 300) {
-      final provider = context.read<MedicationProvider>();
-      if (!provider.isLoadingHistory && provider.hasMoreHistory) {
-        provider.loadMoreHistory();
-      }
-    }
-  }
+  DateTime _focusedDay = DateTime.now();
+  DateTime? _selectedDay;
 
   @override
   Widget build(BuildContext context) {
@@ -60,49 +40,39 @@ class _MedicationsScreenState extends State<MedicationsScreen> {
       );
     }
 
-    // Group history by scheduledDate descending
-    final grouped = _groupByDate(medProv.adherenceHistory);
-
     return RefreshIndicator(
       color: AppColors.primary,
       onRefresh: () => medProv.loadAll(),
       child: CustomScrollView(
-        controller: _scrollController,
         slivers: [
-          // Section A: Adherence Rate Banner
+          // Adherence Rate Banner
           SliverToBoxAdapter(
             child: _AdherenceRateBanner(rate: medProv.adherenceRate),
           ),
 
-          // Section B: Today's Schedule header
+          // Today's Schedule header
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(16, 20, 16, 8),
-              child: Row(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          "Today's Schedule",
-                          style: GoogleFonts.lexend(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w700,
-                            color: AppColors.textPrimary,
-                          ),
-                        ),
-                        if (patientProv.activePatientName != null)
-                          Text(
-                            patientProv.activePatientName!,
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: AppColors.textSecondary,
-                            ),
-                          ),
-                      ],
+                  Text(
+                    "Today's Schedule",
+                    style: GoogleFonts.lexend(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                      color: AppColors.textPrimary,
                     ),
                   ),
+                  if (patientProv.activePatientName != null)
+                    Text(
+                      patientProv.activePatientName!,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: AppColors.textSecondary,
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -149,12 +119,11 @@ class _MedicationsScreenState extends State<MedicationsScreen> {
                       ),
           ),
 
-          // Section C: Add Medication button (doctor with edit perms only)
+          // Add Medication button (doctor with edit perms only)
           if (canEdit)
             SliverToBoxAdapter(
               child: Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                 child: OutlinedButton.icon(
                   onPressed: () => Navigator.of(context).push(
                     MaterialPageRoute(
@@ -177,14 +146,14 @@ class _MedicationsScreenState extends State<MedicationsScreen> {
               ),
             ),
 
-          // Section D: Adherence History header
+          // Adherence Calendar header
           SliverToBoxAdapter(
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 20, 16, 8),
+              padding: const EdgeInsets.fromLTRB(16, 20, 16, 4),
               child: Row(
                 children: [
                   Text(
-                    'Adherence History',
+                    'Adherence Calendar',
                     style: GoogleFonts.lexend(
                       fontSize: 16,
                       fontWeight: FontWeight.w700,
@@ -192,99 +161,82 @@ class _MedicationsScreenState extends State<MedicationsScreen> {
                     ),
                   ),
                   const SizedBox(width: 8),
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: AppColors.primaryLighter,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Text(
-                      '30 days',
-                      style: TextStyle(
-                        fontSize: 11,
+                  if (medProv.isLoadingCalendar)
+                    const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
                         color: AppColors.primary,
-                        fontWeight: FontWeight.w600,
                       ),
                     ),
-                  ),
+                  const Spacer(),
+                  // Legend
+                  _LegendDot(color: AppColors.vitalsGreen, label: 'Good'),
+                  const SizedBox(width: 8),
+                  _LegendDot(color: AppColors.warning, label: 'Partial'),
+                  const SizedBox(width: 8),
+                  _LegendDot(color: AppColors.error, label: 'Missed'),
                 ],
               ),
             ),
           ),
 
-          // Date grouped history
-          if (grouped.isEmpty && !medProv.isLoadingHistory)
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Text(
-                  'No history available.',
-                  style: TextStyle(color: AppColors.textSecondary),
-                ),
-              ),
-            ),
-
-          for (final entry in grouped.entries) ...[
-            SliverToBoxAdapter(
-              child: _DateGroupHeader(dateLabel: entry.key),
-            ),
-            SliverList(
-              delegate: SliverChildBuilderDelegate(
-                (context, index) {
-                  final adherence = entry.value[index];
-                  return _AdherenceHistoryCard(
-                    adherence: adherence,
-                    canEdit: canEdit,
-                    onMarkTaken: () async {
-                      final ok =
-                          await medProv.markTaken(adherence.id);
-                      if (ok && context.mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('Marked as taken'),
-                            backgroundColor: AppColors.success,
-                          ),
-                        );
-                      }
-                    },
-                    onSkip: () => _showSkipDialog(context, medProv, adherence.id),
-                  );
-                },
-                childCount: entry.value.length,
-              ),
-            ),
-          ],
-
-          // Loading more indicator
+          // Calendar widget
           SliverToBoxAdapter(
-            child: medProv.isLoadingHistory
-                ? const Padding(
-                    padding: EdgeInsets.all(16),
-                    child: Center(
-                      child: CircularProgressIndicator(
-                          color: AppColors.primary),
-                    ),
-                  )
-                : const SizedBox(height: 20),
+            child: _AdherenceCalendar(
+              calendarData: medProv.calendarData,
+              focusedDay: _focusedDay,
+              selectedDay: _selectedDay,
+              onDaySelected: (selected, focused) {
+                setState(() {
+                  _selectedDay = selected;
+                  _focusedDay = focused;
+                });
+                _showDaySheet(context, selected, medProv, canEdit);
+              },
+              onPageChanged: (focused) {
+                setState(() => _focusedDay = focused);
+              },
+            ),
           ),
+
+          const SliverToBoxAdapter(child: SizedBox(height: 24)),
         ],
       ),
     );
   }
 
-  /// Groups adherence history by scheduledDate label, newest first.
-  Map<String, List<MedicationAdherence>> _groupByDate(
-      List<MedicationAdherence> history) {
-    final sorted = List<MedicationAdherence>.from(history)
-      ..sort((a, b) => b.scheduledDate.compareTo(a.scheduledDate));
-
-    final map = <String, List<MedicationAdherence>>{};
-    for (final item in sorted) {
-      final key = DateFormat('EEEE, MMM d').format(item.scheduledDate);
-      map.putIfAbsent(key, () => []).add(item);
-    }
-    return map;
+  void _showDaySheet(
+    BuildContext context,
+    DateTime day,
+    MedicationProvider medProv,
+    bool canEdit,
+  ) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _DayScheduleSheet(
+        day: day,
+        medProv: medProv,
+        canEdit: canEdit,
+        onMarkTaken: (id) async {
+          Navigator.pop(context);
+          final ok = await medProv.markTaken(id);
+          if (ok && context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text('Marked as taken'),
+              backgroundColor: AppColors.success,
+            ));
+          }
+        },
+        onSkip: (id) {
+          Navigator.pop(context);
+          _showSkipDialog(context, medProv, id);
+        },
+      ),
+    );
   }
 
   void _showDetailSheet(
@@ -304,12 +256,10 @@ class _MedicationsScreenState extends State<MedicationsScreen> {
           Navigator.pop(context);
           final ok = await medProv.markTaken(schedule.id);
           if (ok && context.mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Marked as taken'),
-                backgroundColor: AppColors.success,
-              ),
-            );
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text('Marked as taken'),
+              backgroundColor: AppColors.success,
+            ));
           }
         },
         onSkip: () {
@@ -325,11 +275,9 @@ class _MedicationsScreenState extends State<MedicationsScreen> {
                     .where((m) => m.id == schedule.medication.id)
                     .firstOrNull;
                 if (med != null) {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) => EditMedicationScreen(medication: med),
-                    ),
-                  );
+                  Navigator.of(context).push(MaterialPageRoute(
+                    builder: (_) => EditMedicationScreen(medication: med),
+                  ));
                 }
               }
             : null,
@@ -343,7 +291,7 @@ class _MedicationsScreenState extends State<MedicationsScreen> {
 
   void _showDeleteDialog(
       BuildContext context, MedicationProvider medProv, int medId, String name) {
-    Navigator.pop(context); // close bottom sheet first
+    Navigator.pop(context);
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -366,12 +314,10 @@ class _MedicationsScreenState extends State<MedicationsScreen> {
               Navigator.pop(ctx);
               final ok = await medProv.deleteMedication(medId);
               if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(ok ? '$name deleted' : 'Failed to delete'),
-                    backgroundColor: ok ? AppColors.error : AppColors.warning,
-                  ),
-                );
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  content: Text(ok ? '$name deleted' : 'Failed to delete'),
+                  backgroundColor: ok ? AppColors.error : AppColors.warning,
+                ));
               }
             },
             child: const Text('Delete'),
@@ -402,26 +348,426 @@ class _MedicationsScreenState extends State<MedicationsScreen> {
           ),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.primary,
-                foregroundColor: Colors.white),
+                backgroundColor: AppColors.primary, foregroundColor: Colors.white),
             onPressed: () async {
               Navigator.pop(ctx);
               final reason =
                   reasonController.text.isEmpty ? 'No reason' : reasonController.text;
               final ok = await medProv.skipMedication(adherenceId, reason);
               if (ok && context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Medication skipped'),
-                    backgroundColor: AppColors.warning,
-                  ),
-                );
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                  content: Text('Medication skipped'),
+                  backgroundColor: AppColors.warning,
+                ));
               }
             },
             child: const Text('Skip'),
           ),
         ],
       ),
+    );
+  }
+}
+
+// ============================================================
+// Adherence Calendar
+// ============================================================
+
+class _AdherenceCalendar extends StatelessWidget {
+  final Map<String, Map<String, int>> calendarData;
+  final DateTime focusedDay;
+  final DateTime? selectedDay;
+  final void Function(DateTime selected, DateTime focused) onDaySelected;
+  final void Function(DateTime focused) onPageChanged;
+
+  const _AdherenceCalendar({
+    required this.calendarData,
+    required this.focusedDay,
+    required this.selectedDay,
+    required this.onDaySelected,
+    required this.onPageChanged,
+  });
+
+  Color? _colorForDay(DateTime day) {
+    final today = DateTime.now();
+    final isToday = isSameDay(day, today);
+    final isFuture = day.isAfter(today) && !isToday;
+
+    if (isFuture) return const Color(0xFF3B82F6); // blue for future
+
+    final key =
+        '${day.year}-${day.month.toString().padLeft(2, '0')}-${day.day.toString().padLeft(2, '0')}';
+    final data = calendarData[key];
+    if (data == null) return null; // no data — no dot
+
+    final total = data['total'] ?? 0;
+    final taken = data['taken'] ?? 0;
+    if (total == 0) return null;
+
+    final rate = taken / total;
+    if (rate >= 0.8) return AppColors.vitalsGreen;
+    if (rate >= 0.4) return AppColors.warning;
+    return AppColors.error;
+  }
+
+  bool _hasDot(DateTime day) {
+    final today = DateTime.now();
+    final isToday = isSameDay(day, today);
+    final isFuture = day.isAfter(today) && !isToday;
+    if (isFuture) return true;
+    final key =
+        '${day.year}-${day.month.toString().padLeft(2, '0')}-${day.day.toString().padLeft(2, '0')}';
+    return calendarData.containsKey(key);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: AppColors.shadowLight,
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: TableCalendar(
+        firstDay: DateTime.now().subtract(const Duration(days: 90)),
+        lastDay: DateTime.now().add(const Duration(days: 60)),
+        focusedDay: focusedDay,
+        selectedDayPredicate: (d) => isSameDay(d, selectedDay),
+        onDaySelected: onDaySelected,
+        onPageChanged: onPageChanged,
+        calendarFormat: CalendarFormat.month,
+        availableCalendarFormats: const {CalendarFormat.month: 'Month'},
+        headerStyle: HeaderStyle(
+          formatButtonVisible: false,
+          titleCentered: true,
+          titleTextStyle: GoogleFonts.lexend(
+            fontSize: 15,
+            fontWeight: FontWeight.w600,
+            color: AppColors.textPrimary,
+          ),
+          leftChevronIcon:
+              Icon(Icons.chevron_left, color: AppColors.textSecondary),
+          rightChevronIcon:
+              Icon(Icons.chevron_right, color: AppColors.textSecondary),
+          headerPadding: const EdgeInsets.symmetric(vertical: 8),
+        ),
+        daysOfWeekStyle: DaysOfWeekStyle(
+          weekdayStyle: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: AppColors.textSecondary),
+          weekendStyle: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: AppColors.textTertiary),
+        ),
+        calendarStyle: CalendarStyle(
+          outsideDaysVisible: false,
+          todayDecoration: BoxDecoration(
+            color: AppColors.primary.withOpacity(0.15),
+            shape: BoxShape.circle,
+          ),
+          todayTextStyle: TextStyle(
+            color: AppColors.primary,
+            fontWeight: FontWeight.w700,
+          ),
+          selectedDecoration: BoxDecoration(
+            color: AppColors.primary,
+            shape: BoxShape.circle,
+          ),
+          selectedTextStyle: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.w700,
+          ),
+          defaultTextStyle: TextStyle(color: AppColors.textPrimary),
+          weekendTextStyle: TextStyle(color: AppColors.textPrimary),
+        ),
+        calendarBuilders: CalendarBuilders(
+          markerBuilder: (context, day, events) {
+            if (!_hasDot(day)) return const SizedBox.shrink();
+            final color = _colorForDay(day);
+            if (color == null) return const SizedBox.shrink();
+            return Positioned(
+              bottom: 4,
+              child: Container(
+                width: 6,
+                height: 6,
+                decoration: BoxDecoration(
+                  color: color,
+                  shape: BoxShape.circle,
+                ),
+              ),
+            );
+          },
+          // Tint the entire day cell background for past days
+          defaultBuilder: (context, day, focusedDay) {
+            final color = _colorForDay(day);
+            if (color == null) return null;
+            final today = DateTime.now();
+            final isFuture = day.isAfter(today) && !isSameDay(day, today);
+            if (isFuture) return null; // future — only dot, no bg tint
+            return Container(
+              margin: const EdgeInsets.all(4),
+              decoration: BoxDecoration(
+                color: color.withOpacity(0.12),
+                shape: BoxShape.circle,
+              ),
+              alignment: Alignment.center,
+              child: Text(
+                '${day.day}',
+                style: TextStyle(
+                  fontSize: 13,
+                  color: color.withOpacity(0.9),
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+// ============================================================
+// Day Schedule Bottom Sheet
+// ============================================================
+
+class _DayScheduleSheet extends StatefulWidget {
+  final DateTime day;
+  final MedicationProvider medProv;
+  final bool canEdit;
+  final void Function(int id) onMarkTaken;
+  final void Function(int id) onSkip;
+
+  const _DayScheduleSheet({
+    required this.day,
+    required this.medProv,
+    required this.canEdit,
+    required this.onMarkTaken,
+    required this.onSkip,
+  });
+
+  @override
+  State<_DayScheduleSheet> createState() => _DayScheduleSheetState();
+}
+
+class _DayScheduleSheetState extends State<_DayScheduleSheet> {
+  List<MedicationSchedule>? _schedule;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.medProv.loadDaySchedule(widget.day).then((list) {
+      if (mounted) setState(() { _schedule = list; _loading = false; });
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final dateLabel = DateFormat('EEEE, MMMM d, yyyy').format(widget.day);
+    final today = DateTime.now();
+    final isFuture = widget.day.isAfter(DateTime(today.year, today.month, today.day));
+
+    return Container(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.of(context).size.height * 0.65,
+      ),
+      decoration: const BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      padding: EdgeInsets.fromLTRB(
+          20, 16, 20, MediaQuery.of(context).viewInsets.bottom + 20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Handle
+          Center(
+            child: Container(
+              width: 40, height: 4,
+              decoration: BoxDecoration(
+                color: AppColors.divider,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+          const SizedBox(height: 14),
+          Text(
+            dateLabel,
+            style: GoogleFonts.lexend(
+              fontSize: 16,
+              fontWeight: FontWeight.w700,
+              color: AppColors.textPrimary,
+            ),
+          ),
+          const SizedBox(height: 12),
+          if (_loading)
+            const Padding(
+              padding: EdgeInsets.all(24),
+              child: Center(child: CircularProgressIndicator(color: AppColors.primary)),
+            )
+          else if (_schedule == null || _schedule!.isEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 24),
+              child: Center(
+                child: Text(
+                  'No medications scheduled for this day.',
+                  style: TextStyle(color: AppColors.textSecondary),
+                ),
+              ),
+            )
+          else
+            Flexible(
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: _schedule!.length,
+                itemBuilder: (ctx, i) {
+                  final s = _schedule![i];
+                  return _DayScheduleRow(
+                    schedule: s,
+                    canEdit: widget.canEdit && !isFuture,
+                    onMarkTaken: () => widget.onMarkTaken(s.id),
+                    onSkip: () => widget.onSkip(s.id),
+                  );
+                },
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DayScheduleRow extends StatelessWidget {
+  final MedicationSchedule schedule;
+  final bool canEdit;
+  final VoidCallback onMarkTaken;
+  final VoidCallback onSkip;
+
+  const _DayScheduleRow({
+    required this.schedule,
+    required this.canEdit,
+    required this.onMarkTaken,
+    required this.onSkip,
+  });
+
+  Color _statusColor(String s) {
+    switch (s) {
+      case 'TAKEN': return AppColors.vitalsGreen;
+      case 'MISSED': return AppColors.error;
+      case 'SKIPPED': return AppColors.textTertiary;
+      default: return AppColors.warning;
+    }
+  }
+
+  IconData _statusIcon(String s) {
+    switch (s) {
+      case 'TAKEN': return Icons.check_circle;
+      case 'MISSED': return Icons.warning_amber_rounded;
+      case 'SKIPPED': return Icons.cancel;
+      default: return Icons.schedule;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final color = _statusColor(schedule.status);
+    final timeStr = DateFormat('HH:mm').format(schedule.scheduledTime);
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppColors.background,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: color.withOpacity(0.3)),
+      ),
+      child: Row(
+        children: [
+          Icon(_statusIcon(schedule.status), size: 20, color: color),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  schedule.medication.medicationName,
+                  style: GoogleFonts.lexend(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.textPrimary,
+                  ),
+                ),
+                Text(
+                  '$timeStr · ${schedule.medication.dosage}',
+                  style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
+                ),
+              ],
+            ),
+          ),
+          if (canEdit && schedule.isScheduled)
+            PopupMenuButton<String>(
+              padding: EdgeInsets.zero,
+              icon: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: AppColors.primaryLighter,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  'Mark',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.primary,
+                  ),
+                ),
+              ),
+              onSelected: (val) {
+                if (val == 'taken') onMarkTaken();
+                if (val == 'skip') onSkip();
+              },
+              itemBuilder: (_) => [
+                const PopupMenuItem(value: 'taken', child: Text('Taken')),
+                const PopupMenuItem(value: 'skip', child: Text('Skip')),
+              ],
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================
+// Legend dot
+// ============================================================
+
+class _LegendDot extends StatelessWidget {
+  final Color color;
+  final String label;
+  const _LegendDot({required this.color, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Container(
+          width: 8, height: 8,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 4),
+        Text(label, style: TextStyle(fontSize: 10, color: AppColors.textSecondary)),
+      ],
     );
   }
 }
@@ -491,10 +837,7 @@ class _AdherenceRateBanner extends StatelessWidget {
             children: [
               Text(
                 '7-day adherence',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: AppColors.textSecondary,
-                ),
+                style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
               ),
               const SizedBox(height: 4),
               Text(
@@ -514,7 +857,7 @@ class _AdherenceRateBanner extends StatelessWidget {
 }
 
 // ============================================================
-// Schedule Chip
+// Schedule Chip (today's horizontal list)
 // ============================================================
 
 class _ScheduleChip extends StatelessWidget {
@@ -530,14 +873,10 @@ class _ScheduleChip extends StatelessWidget {
 
   Color _statusColor(String status) {
     switch (status) {
-      case 'TAKEN':
-        return AppColors.vitalsGreen;
-      case 'MISSED':
-        return AppColors.error;
-      case 'SKIPPED':
-        return AppColors.textTertiary;
-      default:
-        return AppColors.warning;
+      case 'TAKEN': return AppColors.vitalsGreen;
+      case 'MISSED': return AppColors.error;
+      case 'SKIPPED': return AppColors.textTertiary;
+      default: return AppColors.warning;
     }
   }
 
@@ -569,8 +908,7 @@ class _ScheduleChip extends StatelessWidget {
           children: [
             Row(
               children: [
-                Icon(Icons.medication,
-                    size: 16, color: AppColors.primary),
+                Icon(Icons.medication, size: 16, color: AppColors.primary),
                 const Spacer(),
                 Container(
                   width: 8,
@@ -596,10 +934,7 @@ class _ScheduleChip extends StatelessWidget {
             const SizedBox(height: 2),
             Text(
               timeStr,
-              style: TextStyle(
-                fontSize: 11,
-                color: AppColors.textSecondary,
-              ),
+              style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
             ),
           ],
         ),
@@ -609,232 +944,7 @@ class _ScheduleChip extends StatelessWidget {
 }
 
 // ============================================================
-// Date Group Header
-// ============================================================
-
-class _DateGroupHeader extends StatelessWidget {
-  final String dateLabel;
-  const _DateGroupHeader({required this.dateLabel});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-      child: Text(
-        dateLabel,
-        style: GoogleFonts.lexend(
-          fontSize: 13,
-          fontWeight: FontWeight.w600,
-          color: AppColors.textSecondary,
-        ),
-      ),
-    );
-  }
-}
-
-// ============================================================
-// Adherence History Card
-// ============================================================
-
-class _AdherenceHistoryCard extends StatelessWidget {
-  final MedicationAdherence adherence;
-  final bool canEdit;
-  final VoidCallback onMarkTaken;
-  final VoidCallback onSkip;
-
-  const _AdherenceHistoryCard({
-    required this.adherence,
-    required this.canEdit,
-    required this.onMarkTaken,
-    required this.onSkip,
-  });
-
-  IconData _statusIcon(String status) {
-    switch (status) {
-      case 'TAKEN':
-        return Icons.check_circle;
-      case 'SKIPPED':
-        return Icons.cancel;
-      case 'MISSED':
-        return Icons.warning_amber_rounded;
-      default:
-        return Icons.hourglass_empty;
-    }
-  }
-
-  Color _statusColor(String status) {
-    switch (status) {
-      case 'TAKEN':
-        return AppColors.vitalsGreen;
-      case 'MISSED':
-        return AppColors.error;
-      case 'SKIPPED':
-        return AppColors.textTertiary;
-      default:
-        return AppColors.warning;
-    }
-  }
-
-  Widget? _confirmationBadge(String method) {
-    switch (method) {
-      case 'MONITOR_AGENT':
-        return _badge('AI', const Color(0xFF0D9488));
-      case 'AI_VERBAL':
-        return _badge('Voice', const Color(0xFF8B5CF6));
-      case 'FAMILY':
-        return _badge('Family', AppColors.vitalsBlue);
-      default:
-        return null;
-    }
-  }
-
-  Widget _badge(String label, Color color) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.12),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: color.withOpacity(0.4)),
-      ),
-      child: Text(
-        label,
-        style: TextStyle(
-          fontSize: 10,
-          fontWeight: FontWeight.w600,
-          color: color,
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final statusColor = _statusColor(adherence.status);
-    final timeStr = adherence.takenAt != null
-        ? DateFormat('HH:mm').format(adherence.takenAt!)
-        : '';
-    final badge = _confirmationBadge(adherence.confirmationMethod);
-
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: AppColors.shadowLight,
-            blurRadius: 6,
-            offset: const Offset(0, 1),
-          ),
-        ],
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Status icon circle
-          Container(
-            width: 36,
-            height: 36,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: statusColor.withOpacity(0.12),
-            ),
-            child: Icon(_statusIcon(adherence.status),
-                size: 18, color: statusColor),
-          ),
-          const SizedBox(width: 12),
-
-          // Middle content
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        adherence.medicationName,
-                        style: GoogleFonts.lexend(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                          color: AppColors.textPrimary,
-                        ),
-                      ),
-                    ),
-                    if (badge != null) badge,
-                  ],
-                ),
-                if (adherence.dosage.isNotEmpty)
-                  Text(
-                    adherence.dosage,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: AppColors.textSecondary,
-                    ),
-                  ),
-                if (timeStr.isNotEmpty)
-                  Text(
-                    timeStr,
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: AppColors.textTertiary,
-                    ),
-                  ),
-                if (adherence.notes != null && adherence.notes!.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 4),
-                    child: Text(
-                      adherence.notes!,
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: AppColors.textSecondary,
-                        fontStyle: FontStyle.italic,
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-
-          // Mark action for SCHEDULED items (doctor only)
-          if (canEdit && adherence.status == 'SCHEDULED') ...[
-            const SizedBox(width: 8),
-            PopupMenuButton<String>(
-              padding: EdgeInsets.zero,
-              icon: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: AppColors.primaryLighter,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  'Mark',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: AppColors.primary,
-                  ),
-                ),
-              ),
-              onSelected: (val) {
-                if (val == 'taken') onMarkTaken();
-                if (val == 'skip') onSkip();
-              },
-              itemBuilder: (_) => [
-                const PopupMenuItem(value: 'taken', child: Text('Taken')),
-                const PopupMenuItem(value: 'skip', child: Text('Skip')),
-              ],
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-// ============================================================
-// Medication Detail Bottom Sheet
+// Medication Detail Bottom Sheet (for today's chips)
 // ============================================================
 
 class _MedicationDetailSheet extends StatelessWidget {
@@ -856,14 +966,10 @@ class _MedicationDetailSheet extends StatelessWidget {
 
   Color _statusColor(String status) {
     switch (status) {
-      case 'TAKEN':
-        return AppColors.vitalsGreen;
-      case 'MISSED':
-        return AppColors.error;
-      case 'SKIPPED':
-        return AppColors.textTertiary;
-      default:
-        return AppColors.warning;
+      case 'TAKEN': return AppColors.vitalsGreen;
+      case 'MISSED': return AppColors.error;
+      case 'SKIPPED': return AppColors.textTertiary;
+      default: return AppColors.warning;
     }
   }
 
@@ -883,11 +989,9 @@ class _MedicationDetailSheet extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Handle bar
             Center(
               child: Container(
-                width: 40,
-                height: 4,
+                width: 40, height: 4,
                 decoration: BoxDecoration(
                   color: AppColors.divider,
                   borderRadius: BorderRadius.circular(2),
@@ -895,7 +999,6 @@ class _MedicationDetailSheet extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 16),
-
             Text(
               med.medicationName,
               style: GoogleFonts.lexend(
@@ -905,8 +1008,6 @@ class _MedicationDetailSheet extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 12),
-
-            // 2x2 info grid
             Wrap(
               spacing: 8,
               runSpacing: 8,
@@ -918,22 +1019,17 @@ class _MedicationDetailSheet extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 12),
-
             Row(
               children: [
-                Icon(Icons.access_time,
-                    size: 16, color: AppColors.textSecondary),
+                Icon(Icons.access_time, size: 16, color: AppColors.textSecondary),
                 const SizedBox(width: 6),
                 Text(
                   'Scheduled: ${DateFormat('HH:mm').format(schedule.scheduledTime)}',
-                  style:
-                      TextStyle(fontSize: 13, color: AppColors.textSecondary),
+                  style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
                 ),
               ],
             ),
             const SizedBox(height: 8),
-
-            // Status badge
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
               decoration: BoxDecoration(
@@ -950,7 +1046,6 @@ class _MedicationDetailSheet extends StatelessWidget {
                 ),
               ),
             ),
-
             if (canEdit && schedule.isScheduled) ...[
               const SizedBox(height: 20),
               Row(
@@ -987,7 +1082,6 @@ class _MedicationDetailSheet extends StatelessWidget {
                 ],
               ),
             ],
-
             if (onEdit != null) ...[
               const SizedBox(height: 12),
               OutlinedButton.icon(
@@ -1044,16 +1138,11 @@ class _InfoChip extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            label,
-            style: TextStyle(fontSize: 10, color: AppColors.textSecondary),
-          ),
+          Text(label,
+              style: TextStyle(fontSize: 10, color: AppColors.textSecondary)),
           Text(
             value.isEmpty ? '—' : value,
-            style: const TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-            ),
+            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
           ),
         ],
       ),

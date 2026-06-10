@@ -186,6 +186,23 @@ class MedicationService {
     }
   }
 
+  /// Get per-day adherence summary for calendar colouring.
+  /// Returns map of { "YYYY-MM-DD": { total, taken, missed, skipped, scheduled } }
+  Future<Map<String, dynamic>> getCalendarSummary({
+    required int patientId,
+    int monthsBack = 2,
+  }) async {
+    try {
+      final response = await _api.get(
+        '/api/v1/medications/adherence/calendar_summary/',
+        queryParameters: {'patient_id': patientId, 'months_back': monthsBack},
+      );
+      return Map<String, dynamic>.from(response.data as Map);
+    } catch (e) {
+      throw Exception('Failed to load calendar summary: $e');
+    }
+  }
+
   /// Get adherence history with patient filter
   Future<Map<String, dynamic>> getAdherenceHistory({
     int? medicationId,

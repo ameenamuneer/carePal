@@ -16,6 +16,12 @@ class MedicationProvider extends ChangeNotifier {
   bool _hasMoreHistory = true;
   int _historyPage = 1;
 
+  // Calendar: { "YYYY-MM-DD": { total, taken, missed, skipped, scheduled } }
+  Map<String, Map<String, int>> _calendarData = {};
+  // Cached day schedules for the popup: { "YYYY-MM-DD": [MedicationSchedule] }
+  final Map<String, List<MedicationSchedule>> _dayScheduleCache = {};
+  bool _isLoadingCalendar = false;
+
   List<MedicationSchedule> get todaysSchedule => _todaysSchedule;
   List<MedicationAdherence> get adherenceHistory => _adherenceHistory;
   List<Medication> get medications => _medications;
@@ -25,6 +31,8 @@ class MedicationProvider extends ChangeNotifier {
   String? get error => _error;
   int? get patientId => _patientId;
   bool get hasMoreHistory => _hasMoreHistory;
+  Map<String, Map<String, int>> get calendarData => _calendarData;
+  bool get isLoadingCalendar => _isLoadingCalendar;
 
   void _safeNotify() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -49,7 +57,7 @@ class MedicationProvider extends ChangeNotifier {
       loadTodaysSchedule(),
       loadMedications(),
       loadAdherenceRate(),
-      loadHistory(reset: true),
+      loadCalendarSummary(),
     ]);
   }
 
@@ -90,6 +98,47 @@ class MedicationProvider extends ChangeNotifier {
       _safeNotify();
     } catch (e) {
       debugPrint('Error loading medications: $e');
+    }
+  }
+
+  Future<void> loadCalendarSummary() async {
+    if (_patientId == null) return;
+    _isLoadingCalendar = true;
+    _safeNotify();
+    try {
+      final raw = await _service.getCalendarSummary(patientId: _patientId!);
+      _calendarData = raw.map((k, v) {
+        final m = Map<String, dynamic>.from(v as Map);
+        return MapEntry(k, {
+          'total': (m['total'] as num).toInt(),
+          'taken': (m['taken'] as num).toInt(),
+          'missed': (m['missed'] as num).toInt(),
+          'skipped': (m['skipped'] as num).toInt(),
+          'scheduled': (m['scheduled'] as num).toInt(),
+        });
+      });
+    } catch (e) {
+      debugPrint('Error loading calendar summary: $e');
+    } finally {
+      _isLoadingCalendar = false;
+      _safeNotify();
+    }
+  }
+
+  /// Fetch (and cache) the schedule for a specific date for the day popup.
+  Future<List<MedicationSchedule>> loadDaySchedule(DateTime day) async {
+    if (_patientId == null) return [];
+    final key = '${day.year}-${day.month.toString().padLeft(2, '0')}-${day.day.toString().padLeft(2, '0')}';
+    if (_dayScheduleCache.containsKey(key)) return _dayScheduleCache[key]!;
+    try {
+      final results = await _service.getTodaysSchedule(patientId: _patientId, date: key);
+      final list = results
+          .map((i) => MedicationSchedule.fromJson(i as Map<String, dynamic>))
+          .toList();
+      _dayScheduleCache[key] = list;
+      return list;
+    } catch (e) {
+      return [];
     }
   }
 
@@ -156,9 +205,8 @@ class MedicationProvider extends ChangeNotifier {
         notes: notes,
         confirmationMethod: 'MANUAL',
       );
-      // Refresh local data
-      await loadTodaysSchedule();
-      await loadHistory(reset: true);
+      _dayScheduleCache.clear();
+      await Future.wait([loadTodaysSchedule(), loadCalendarSummary()]);
       return true;
     } catch (e) {
       _error = e.toString();
@@ -174,8 +222,8 @@ class MedicationProvider extends ChangeNotifier {
         adherenceId: adherenceId,
         reason: reason,
       );
-      await loadTodaysSchedule();
-      await loadHistory(reset: true);
+      _dayScheduleCache.clear();
+      await Future.wait([loadTodaysSchedule(), loadCalendarSummary()]);
       return true;
     } catch (e) {
       _error = e.toString();
@@ -209,6 +257,9 @@ class MedicationProvider extends ChangeNotifier {
     _patientId = null;
     _hasMoreHistory = true;
     _historyPage = 1;
+    _calendarData = {};
+    _dayScheduleCache.clear();
+    _isLoadingCalendar = false;
     notifyListeners();
   }
 }

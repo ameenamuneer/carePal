@@ -705,6 +705,58 @@ class MedicationAdherenceViewSet(viewsets.ModelViewSet):
         serializer = AdherenceRateSerializer(data)
         return Response(serializer.data)
 
+    @action(detail=False, methods=['get'])
+    def calendar_summary(self, request):
+        """
+        Return per-day adherence summary for calendar colouring.
+        GET /api/v1/medications/adherence/calendar_summary/?patient_id=1&months_back=2
+
+        Response: { "YYYY-MM-DD": { total, taken, missed, skipped, scheduled } }
+        Only covers today and past dates — future dates are coloured client-side.
+        """
+        from datetime import date as date_type
+
+        patient_id = request.query_params.get('patient_id')
+        if not patient_id and request.user.user_type == 'PATIENT':
+            patient = PatientProfile.objects.filter(user=request.user).first()
+            patient_id = patient.id if patient else None
+
+        if not patient_id:
+            return Response({'error': 'patient_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        months_back = int(request.query_params.get('months_back', 2))
+        today = timezone.now().date()
+        start_date = today - timedelta(days=months_back * 30)
+
+        rows = (
+            MedicationAdherence.objects
+            .filter(
+                medication__patient_id=patient_id,
+                scheduled_date__gte=start_date,
+                scheduled_date__lte=today,
+            )
+            .values('scheduled_date')
+            .annotate(
+                total=Count('id'),
+                taken=Count('id', filter=Q(status='TAKEN')),
+                missed=Count('id', filter=Q(status='MISSED')),
+                skipped=Count('id', filter=Q(status='SKIPPED')),
+                scheduled=Count('id', filter=Q(status='SCHEDULED')),
+            )
+        )
+
+        result = {
+            str(r['scheduled_date']): {
+                'total': r['total'],
+                'taken': r['taken'],
+                'missed': r['missed'],
+                'skipped': r['skipped'],
+                'scheduled': r['scheduled'],
+            }
+            for r in rows
+        }
+        return Response(result)
+
 
 # ==========================================
 # Legacy/Auxiliary ViewSets (Preserved)
