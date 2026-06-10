@@ -1,16 +1,10 @@
 from django.contrib import admin
 from django.utils.html import format_html
 from .models import (
-    Medication, MedicationSchedule, MedicationAdherence,
+    Medication, MedicationAdherence,
     MedicationEscalation, MedicationInteraction, MedicationRefill,
     MedicationAdherencePattern
 )
-
-
-class MedicationScheduleInline(admin.TabularInline):
-    model = MedicationSchedule
-    extra = 1
-    fields = ['time_of_day', 'time_label', 'with_food', 'reminder_enabled', 'is_active']
 
 
 @admin.register(Medication)
@@ -22,41 +16,38 @@ class MedicationAdmin(admin.ModelAdmin):
     ]
     list_filter = ['status', 'form', 'route', 'is_critical', 'start_date']
     search_fields = [
-        'medication_name', 'generic_name', 'brand_name',
+        'medication_name', 'generic_name',
         'patient__user__first_name', 'patient__user__last_name'
     ]
     readonly_fields = ['created_at', 'updated_at', 'is_active', 'needs_refill']
     date_hierarchy = 'start_date'
-    inlines = [MedicationScheduleInline]
-    
+
     fieldsets = (
         ('Patient', {
             'fields': ('patient',)
         }),
         ('Medication Details', {
             'fields': (
-                'medication_name', 'generic_name', 'brand_name',
+                'medication_name', 'generic_name',
                 'dosage', 'form', 'route'
             )
         }),
         ('Schedule', {
             'fields': (
-                'frequency', 'times_per_day', 'start_date', 
+                'frequency', 'dose_times', 'start_date',
                 'end_date', 'duration_days'
             )
         }),
         ('Instructions', {
-            'fields': ('instructions', 'special_instructions', 'purpose')
+            'fields': ('instructions', 'purpose')
         }),
         ('Prescription', {
-            'fields': (
-                'prescribed_by', 'prescription_number', 'prescribed_date'
-            )
+            'fields': ('prescribed_by',)
         }),
         ('Inventory', {
             'fields': (
                 'quantity_prescribed', 'quantity_remaining',
-                'refills_allowed', 'refills_remaining', 'needs_refill'
+                'needs_refill'
             )
         }),
         ('Status', {
@@ -72,7 +63,7 @@ class MedicationAdmin(admin.ModelAdmin):
             'fields': ('created_by', 'created_at', 'updated_at')
         }),
     )
-    
+
     def status_badge(self, obj):
         colors = {
             'ACTIVE': 'green',
@@ -86,22 +77,12 @@ class MedicationAdmin(admin.ModelAdmin):
             color, obj.get_status_display()
         )
     status_badge.short_description = 'Status'
-    
+
     def needs_refill_badge(self, obj):
         if obj.needs_refill:
             return format_html('<span style="color: red;">⚠ Needs Refill</span>')
         return format_html('<span style="color: green;">✓ OK</span>')
     needs_refill_badge.short_description = 'Refill Status'
-
-
-@admin.register(MedicationSchedule)
-class MedicationScheduleAdmin(admin.ModelAdmin):
-    list_display = [
-        'medication', 'time_of_day', 'time_label',
-        'with_food', 'reminder_enabled', 'is_active'
-    ]
-    list_filter = ['with_food', 'reminder_enabled', 'is_active']
-    search_fields = ['medication__medication_name', 'time_label']
 
 
 @admin.register(MedicationAdherence)
@@ -114,10 +95,10 @@ class MedicationAdherenceAdmin(admin.ModelAdmin):
     search_fields = ['medication__medication_name']
     readonly_fields = ['is_overdue', 'delay_minutes', 'created_at', 'updated_at']
     date_hierarchy = 'scheduled_date'
-    
+
     fieldsets = (
         ('Medication', {
-            'fields': ('medication', 'schedule')
+            'fields': ('medication',)
         }),
         ('Schedule', {
             'fields': (
@@ -146,7 +127,7 @@ class MedicationAdherenceAdmin(admin.ModelAdmin):
             'fields': ('created_at', 'updated_at')
         }),
     )
-    
+
     def status_colored(self, obj):
         colors = {
             'SCHEDULED': 'blue',
@@ -161,7 +142,7 @@ class MedicationAdherenceAdmin(admin.ModelAdmin):
             color, obj.get_status_display()
         )
     status_colored.short_description = 'Status'
-    
+
     def is_overdue_badge(self, obj):
         if obj.is_overdue:
             return format_html('<span style="color: red;">⚠ Overdue</span>')
@@ -192,7 +173,7 @@ class MedicationInteractionAdmin(admin.ModelAdmin):
         'description'
     ]
     readonly_fields = ['created_at']
-    
+
     fieldsets = (
         ('Medications', {
             'fields': ('medication_1', 'medication_2')
@@ -209,7 +190,7 @@ class MedicationInteractionAdmin(admin.ModelAdmin):
             'fields': ('is_active', 'created_at')
         }),
     )
-    
+
     def severity_badge(self, obj):
         colors = {
             'MILD': 'green',
@@ -234,30 +215,7 @@ class MedicationRefillAdmin(admin.ModelAdmin):
     list_filter = ['status', 'requested_date', 'filled_date']
     search_fields = ['medication__medication_name', 'pharmacy_name']
     readonly_fields = ['requested_date', 'created_at', 'updated_at']
-    
-    fieldsets = (
-        ('Medication', {
-            'fields': ('medication', 'quantity')
-        }),
-        ('Request', {
-            'fields': ('requested_date', 'requested_by')
-        }),
-        ('Pharmacy', {
-            'fields': ('pharmacy_name', 'pharmacy_phone')
-        }),
-        ('Status', {
-            'fields': ('status', 'notes', 'cancellation_reason')
-        }),
-        ('Fulfillment', {
-            'fields': (
-                'approved_by', 'approved_at', 'filled_date', 'pickup_date'
-            )
-        }),
-        ('Timestamps', {
-            'fields': ('created_at', 'updated_at')
-        }),
-    )
-    
+
     def status_badge(self, obj):
         colors = {
             'REQUESTED': 'blue',
@@ -273,8 +231,6 @@ class MedicationRefillAdmin(admin.ModelAdmin):
             color, obj.get_status_display()
         )
     status_badge.short_description = 'Status'
-
-
 
 
 @admin.register(MedicationAdherencePattern)

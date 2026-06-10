@@ -284,7 +284,8 @@ class MedicationMonitorAgent:
             logger.info(f"[MedAgent] do_nothing for log {log.id}: {args.get('reason', '')}")
 
     def _update_adherence(self, log, medication_name: str, status: str, notes: str, confidence: float) -> None:
-        from medications.models import Medication, MedicationAdherence, MedicationSchedule
+        from medications.models import Medication, MedicationAdherence
+        from medications.schedule_utils import get_times_for_medication
 
         if confidence < 0.6:
             logger.warning(
@@ -324,15 +325,15 @@ class MedicationMonitorAgent:
             )
             return
 
-        schedule = MedicationSchedule.objects.filter(
-            medication=med, is_active=True
-        ).first()
+        # Use first scheduled time from dose_times (or frequency default)
+        times = get_times_for_medication(med)
+        scheduled_time = times[0][0] if times else None
 
         adherence, created = MedicationAdherence.objects.get_or_create(
             medication=med,
             scheduled_date=today,
             defaults={
-                'scheduled_time': schedule.time_of_day if schedule else None,
+                'scheduled_time': scheduled_time,
                 'status': status,
                 'actual_datetime': log.observed_at,
                 'confirmation_method': 'MONITOR_AGENT',
@@ -419,13 +420,12 @@ class MedicationMonitorAgent:
         logger.info(f"[MedAgent] Queued clarification for log {log.id}: '{question}'")
 
     def _build_context(self, log) -> str:
-        from medications.models import Medication, MedicationAdherence, MedicationSchedule
+        from medications.models import Medication, MedicationAdherence
+        from medications.schedule_utils import get_times_for_medication
         from .models import PatientActivityLog
 
         patient = log.patient
         today = date.today()
-
-        from medications.schedule_utils import get_times_for_medication
 
         meds = Medication.objects.filter(patient=patient, status='ACTIVE')
         med_lines = []

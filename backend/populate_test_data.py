@@ -12,7 +12,8 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 from patients.models import PatientProfile, EmergencyContact
 from vitals.models import VitalType, VitalReading, DataSource
-from medications.models import Medication, MedicationSchedule, MedicationAdherence
+from medications.models import Medication, MedicationAdherence
+from medications.schedule_utils import default_dose_times_for_frequency
 from family.models import FamilyMember
 from alerts.models import Alert, AlertType
 
@@ -214,20 +215,12 @@ class TestDataPopulator:
             print(f"   ✓ Meds for {profile.user.username}")
 
     def create_medication_schedules(self):
-        print("\n📅 Creating medication schedules...")
+        print("\n📅 Setting medication dose_times...")
         for med in self.medications:
-            # Simple logic: 8am for once daily, 8am + 8pm for twice
-            times = ['08:00:00']
-            if med.frequency == 'TWICE_DAILY':
-                times.append('20:00:00')
-            
-            for t in times:
-                MedicationSchedule.objects.create(
-                    medication=med,
-                    time_of_day=t,
-                    days_of_week=[] # Everyday
-                )
-        print("   ✓ Schedules created")
+            if not med.dose_times:
+                med.dose_times = default_dose_times_for_frequency(med.frequency)
+                med.save(update_fields=['dose_times'])
+        print("   ✓ dose_times set")
 
     def create_medication_adherence(self):
         print("\n✅ Creating adherence records...")

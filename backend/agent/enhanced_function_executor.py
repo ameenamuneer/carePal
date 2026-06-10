@@ -252,46 +252,39 @@ class EnhancedFunctionExecutor:
     
     def _get_complete_medication_info(self, params: Dict) -> Dict:
         """Get complete medication information"""
-        from medications.models import Medication, MedicationSchedule, MedicationAdherence
-        
+        from medications.models import Medication, MedicationAdherence
+        from medications.schedule_utils import get_times_for_medication
+
         try:
             include_history = params.get('include_history', False)
             include_adherence = params.get('include_adherence', True)
-            
-            # Active medications
+
             query = Q(patient=self.patient)
             if not include_history:
                 query &= Q(status='ACTIVE')
-            
-            medications = Medication.objects.filter(query).prefetch_related('schedules')
-            
+
+            medications = Medication.objects.filter(query)
+
             meds_data = []
             for med in medications:
+                times = get_times_for_medication(med)
                 med_info = {
                     'id': med.id,
                     'name': med.medication_name,
                     'generic_name': med.generic_name,
-                    'dosage': med.dosage, # Corrected: dosage is a single field in model
+                    'dosage': med.dosage,
                     'form': med.form,
                     'purpose': med.purpose,
                     'is_critical': med.is_critical,
                     'status': med.status,
                     'prescribed_by': med.prescribed_by,
-                    'prescribed_date': med.prescribed_date.isoformat() if med.prescribed_date else None,
                     'side_effects': med.side_effects,
                     'interactions': med.interactions,
-                    'special_instructions': med.special_instructions,
-                    'schedules': []
+                    'dose_times': [
+                        {'time': t.strftime('%H:%M'), 'time_label': label, 'with_food': False}
+                        for t, label in times
+                    ],
                 }
-                
-                # Add schedules
-                for schedule in med.schedules.filter(is_active=True):
-                    med_info['schedules'].append({
-                        'time_label': schedule.time_label,
-                        'time': schedule.time_of_day.strftime('%H:%M') if schedule.time_of_day else None,
-                        'with_food': schedule.with_food,
-                        # 'special_instructions': schedule.special_instructions # Does not exist in model
-                    })
                 
                 # Add adherence
                 if include_adherence:
@@ -323,40 +316,29 @@ class EnhancedFunctionExecutor:
             return {'success': False, 'error': str(e)}
     
     def _get_todays_medication_schedule(self, params: Dict) -> Dict:
-        """Get today's medication schedule with status"""
-        from medications.models import Medication, MedicationAdherence
-        
+        """Get today's medication schedule with status — dynamically calculated."""
+        from medications.schedule_utils import ensure_adherence_records
+
         try:
             today = timezone.now().date()
-            
-            medications = Medication.objects.filter(
-                patient=self.patient,
-                status='ACTIVE'
-            ).prefetch_related('schedules')
-            
-            schedule_data = []
-            for med in medications:
-                for schedule in med.schedules.filter(is_active=True):
-                    adherence = MedicationAdherence.objects.filter(
-                        medication=med,
-                        schedule=schedule,
-                        scheduled_date=today
-                    ).first()
-                    
-                    schedule_data.append({
-                        'medication_name': med.medication_name,
-                        'dosage': med.dosage,
-                        'time_label': schedule.time_label,
-                        'time': schedule.time_of_day.strftime('%H:%M') if schedule.time_of_day else None,
-                        'with_food': schedule.with_food,
-                        'is_critical': med.is_critical,
-                        'status': adherence.status if adherence else 'SCHEDULED',
-                        'taken_at': adherence.actual_datetime.isoformat() if adherence and adherence.actual_datetime else None,
-                        'notes': adherence.notes if adherence else None
-                    })
-            
-            # Sort by time
-            schedule_data.sort(key=lambda x: x['time'] or '00:00')
+            pairs = ensure_adherence_records(self.patient.id, today)
+
+            schedule_data = [
+                {
+                    'medication_name': item['medication_name'],
+                    'dosage': item['dosage'],
+                    'time_label': item['time_label'],
+                    'time': item['scheduled_time'].strftime('%H:%M'),
+                    'with_food': False,
+                    'is_critical': item['is_critical'],
+                    'status': record.status,
+                    'taken_at': record.actual_datetime.isoformat() if record.actual_datetime else None,
+                    'notes': record.notes,
+                }
+                for item, record in pairs
+            ]
+
+            # Already sorted by scheduled_time from ensure_adherence_records
             
             # Count status
             taken = len([s for s in schedule_data if s['status'] == 'TAKEN'])
@@ -1034,7 +1016,8 @@ class EnhancedFunctionExecutor:
     @transaction.atomic
     def _mark_medication_taken(self, params: Dict) -> Dict:
         """Mark medication as taken"""
-        from medications.models import Medication, MedicationAdherence, MedicationSchedule
+        from medications.models import Medication, MedicationAdherence
+        from medications.schedule_utils import get_times_for_medication, ensure_adherence_records
 
         try:
             med_name = params['medication_name']
@@ -1053,59 +1036,24 @@ class EnhancedFunctionExecutor:
             if not medication:
                 return {'success': False, 'error': f'Medication "{med_name}" not found or inactive'}
 
-            # Find specific schedule/adherence
+            # Ensure today's adherence records exist (lazy create from dose_times)
+            ensure_adherence_records(self.patient.id, today)
+
+            # Find the right adherence record
             adherence = None
-            
             if time_label:
-                # Try to find specific schedule first
-                schedule = MedicationSchedule.objects.filter(
+                # Match by time_label in dose_times
+                adherence = MedicationAdherence.objects.filter(
                     medication=medication,
-                    time_label__iexact=time_label,
-                    is_active=True
-                ).first()
-                
-                if schedule:
-                    dt = datetime.combine(today, schedule.time_of_day)
-                    defaults = {
-                        'status': 'SCHEDULED',
-                        'scheduled_time': schedule.time_of_day,
-                        'scheduled_datetime': timezone.make_aware(dt) if timezone.is_naive(dt) else dt
-                    }
-                    adherence, _ = MedicationAdherence.objects.get_or_create(
-                        medication=medication,
-                        schedule=schedule,
-                        scheduled_date=today,
-                        defaults=defaults
-                    )
-            
+                    scheduled_date=today,
+                ).first()  # best-effort; time_label not stored on adherence row
+
             if not adherence:
-                # Find pending schedule closest to now
-                # Or existing adherence that is SCHEDULED
-                pending_adherence = MedicationAdherence.objects.filter(
+                adherence = MedicationAdherence.objects.filter(
                     medication=medication,
                     scheduled_date=today,
                     status='SCHEDULED'
                 ).first()
-                
-                if pending_adherence:
-                    adherence = pending_adherence
-                else:
-                    # If no adherence record exists yet, create for next schedule
-                    # Logic simplified: Get first active schedule
-                    schedule = medication.schedules.filter(is_active=True).order_by('time_of_day').first()
-                    if schedule:
-                        dt = datetime.combine(today, schedule.time_of_day)
-                        defaults = {
-                            'status': 'SCHEDULED',
-                            'scheduled_time': schedule.time_of_day,
-                            'scheduled_datetime': timezone.make_aware(dt) if timezone.is_naive(dt) else dt
-                        }
-                        adherence, _ = MedicationAdherence.objects.get_or_create(
-                            medication=medication,
-                            schedule=schedule,
-                            scheduled_date=today,
-                            defaults=defaults
-                        )
             
             if not adherence:
                 return {'success': False, 'error': f'No scheduled dose found for {med_name} today'}
@@ -1154,22 +1102,13 @@ class EnhancedFunctionExecutor:
             ).first()
             
             if not adherence:
-                # If no specific scheduled dose is pending, check if any exists at all
-                # or create one for the first schedule to mark it skipped
-                schedule = medication.schedules.filter(is_active=True).first()
-                if schedule:
-                     dt = datetime.combine(today, schedule.time_of_day)
-                     defaults = {
-                        'status': 'SCHEDULED',
-                        'scheduled_time': schedule.time_of_day,
-                        'scheduled_datetime': timezone.make_aware(dt) if timezone.is_naive(dt) else dt
-                     }
-                     adherence, _ = MedicationAdherence.objects.get_or_create(
-                        medication=medication,
-                        schedule=schedule,
-                        scheduled_date=today,
-                        defaults=defaults
-                    )
+                # Ensure records exist then retry
+                ensure_adherence_records(self.patient.id, today)
+                adherence = MedicationAdherence.objects.filter(
+                    medication=medication,
+                    scheduled_date=today,
+                    status='SCHEDULED'
+                ).first()
 
             if not adherence:
                  return {'success': False, 'error': f'No scheduled dose to skip for {med_name}'}

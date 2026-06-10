@@ -71,13 +71,13 @@ def create_medication_alert(adherence_id):
             
         alert = Alert.objects.create(
             alert_type=alert_type,
-            patient=adherence.schedule.patient,
+            patient=adherence.medication.patient,
             severity=alert_type.default_severity,
-            title=f"Missed Medication: {adherence.schedule.medication.name}",
+            title=f"Missed Medication: {adherence.medication.medication_name}",
             message=f"Missed dose scheduled for {adherence.scheduled_time}",
             medication_adherence=adherence,
             context_data={
-                'medication': adherence.schedule.medication.name,
+                'medication': adherence.medication.medication_name,
                 'scheduled_time': str(adherence.scheduled_time)
             }
         )

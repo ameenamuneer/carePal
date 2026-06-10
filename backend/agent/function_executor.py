@@ -194,9 +194,10 @@ class FunctionExecutor:
             }
     
     def _get_medication_schedule(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Get medication schedule"""
-        from medications.models import Medication, MedicationSchedule, MedicationAdherence
-        
+        """Get medication schedule — dynamically calculated from dose_times."""
+        from medications.schedule_utils import ensure_adherence_records, get_schedule_for_date
+        from medications.models import MedicationAdherence
+
         try:
             # Get date (default: today)
             target_date = params.get('date')
@@ -204,32 +205,36 @@ class FunctionExecutor:
                 target_date = datetime.strptime(target_date, '%Y-%m-%d').date()
             else:
                 target_date = timezone.now().date()
-            
-            # Get active medications
-            medications = Medication.objects.filter(
-                patient=self.patient,
-                status='ACTIVE'
-            ).prefetch_related('schedules', 'adherence_records')
-            
-            schedule_data = []
-            for med in medications:
-                for schedule in med.schedules.filter(is_active=True):
-                    # Check if taken
-                    adherence = MedicationAdherence.objects.filter(
-                        medication=med,
-                        schedule=schedule,
-                        scheduled_date=target_date
-                    ).first()
-                    
-                    schedule_data.append({
-                        'medication_name': med.medication_name,
-                        'dosage': med.dosage_amount,
-                        'time': schedule.time_of_day.strftime('%H:%M') if schedule.time_of_day else None,
-                        'time_label': schedule.time_label,
-                        'with_food': schedule.with_food,
-                        'status': adherence.status if adherence else 'SCHEDULED',
-                        'is_critical': med.is_critical,
-                    })
+
+            today = timezone.now().date()
+            if target_date <= today:
+                pairs = ensure_adherence_records(self.patient.id, target_date)
+                schedule_data = [
+                    {
+                        'medication_name': item['medication_name'],
+                        'dosage': item['dosage'],
+                        'time': item['scheduled_time'].strftime('%H:%M'),
+                        'time_label': item['time_label'],
+                        'with_food': False,
+                        'status': record.status,
+                        'is_critical': item['is_critical'],
+                    }
+                    for item, record in pairs
+                ]
+            else:
+                items = get_schedule_for_date(self.patient.id, target_date)
+                schedule_data = [
+                    {
+                        'medication_name': item['medication_name'],
+                        'dosage': item['dosage'],
+                        'time': item['scheduled_time'].strftime('%H:%M'),
+                        'time_label': item['time_label'],
+                        'with_food': False,
+                        'status': 'SCHEDULED',
+                        'is_critical': item['is_critical'],
+                    }
+                    for item in items
+                ]
             
             return {
                 'success': True,

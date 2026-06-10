@@ -19,7 +19,7 @@ from channels.db import database_sync_to_async
 # App imports
 from vitals.models import VitalReading, VitalType
 from patients.models import PatientProfile
-from medications.models import Medication, MedicationSchedule, MedicationAdherence
+from medications.models import Medication, MedicationAdherence
 from users.models import User
 from agent.models import AgentSession, AgentMessage
 from agent.camera_pan_controller import CameraPanController

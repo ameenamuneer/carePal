@@ -9,12 +9,12 @@ from datetime import datetime, timedelta
 import logging
 
 from .models import (
-    Medication, MedicationSchedule, MedicationAdherence,
+    Medication, MedicationAdherence,
     MedicationRefill, MedicationInteraction, MedicationAdherencePattern
 )
 from .serializers import (
     MedicationListSerializer, MedicationDetailSerializer,
-    MedicationCreateUpdateSerializer, MedicationScheduleSerializer,
+    MedicationCreateUpdateSerializer,
     MedicationAdherenceDetailSerializer, TodaysMedicationScheduleSerializer,
     AdherenceRateSerializer,
     MedicationRefillSerializer, MedicationInteractionSerializer,
@@ -308,15 +308,15 @@ class MedicationViewSet(viewsets.ModelViewSet):
                     }
                 )
                 
-                # Create schedules
-                times = instructions.get('when', [])
-                for time_key in times:
-                    scheduled_time = time_map.get(time_key, '08:00:00')
-                    MedicationSchedule.objects.create(
-                        medication=medication,
-                        time_of_day=scheduled_time,
-                        is_active=True
-                    )
+                # Set dose_times from Eka prescription timing data
+                eka_times = instructions.get('when', [])
+                if eka_times:
+                    label_map = {'morning': 'Morning', 'afternoon': 'Afternoon', 'evening': 'Evening', 'night': 'Night'}
+                    medication.dose_times = [
+                        {'time': time_map.get(tk, '08:00'), 'label': label_map.get(tk, tk.capitalize())}
+                        for tk in eka_times
+                    ]
+                    medication.save(update_fields=['dose_times'])
                 
                 medications.append(medication)
         
@@ -706,31 +706,6 @@ class MedicationAdherenceViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
 
-class MedicationScheduleViewSet(viewsets.ModelViewSet):
-    """
-    Medication schedule management
-    Handles time-based medication scheduling
-    """
-    serializer_class = MedicationScheduleSerializer
-    permission_classes = [IsAuthenticated]
-    
-    def get_queryset(self):
-        user = self.request.user
-        
-        if user.user_type == 'PATIENT':
-            return MedicationSchedule.objects.filter(medication__patient__user=user)
-        elif user.user_type == 'FAMILY':
-            from family.models import FamilyMember
-            linked_patients = FamilyMember.objects.filter(
-                user=user
-            ).values_list('patient_id', flat=True)
-            return MedicationSchedule.objects.filter(
-                medication__patient_id__in=linked_patients
-            )
-        else:
-            return MedicationSchedule.objects.all()
-
-
 # ==========================================
 # Legacy/Auxiliary ViewSets (Preserved)
 # ==========================================
@@ -1041,9 +1016,9 @@ class AIAgentMedicationViewSet(viewsets.ViewSet):
                 'form': adh.medication.form,
                 'scheduled_time': adh.scheduled_time.strftime('%H:%M'),
                 'scheduled_datetime': adh.scheduled_datetime.isoformat(),
-                'time_label': adh.schedule.time_label if adh.schedule else '',
+                'time_label': '',
                 'is_critical': adh.medication.is_critical,
-                'with_food': adh.schedule.with_food if adh.schedule else False,
+                'with_food': False,
                 'status': adh.status,
                 'actual_datetime': adh.actual_datetime.isoformat() if adh.actual_datetime else None
             }
@@ -1289,14 +1264,7 @@ class AIAgentMedicationViewSet(viewsets.ViewSet):
                     'purpose': med.purpose,
                     'is_critical': med.is_critical,
                     'instructions': med.instructions,
-                    'schedules': [
-                        {
-                            'time': sch.time_of_day.strftime('%H:%M'),
-                            'label': sch.time_label,
-                            'with_food': sch.with_food
-                        }
-                        for sch in med.schedules.filter(is_active=True)
-                    ]
+                    'dose_times': med.dose_times,
                 }
                 for med in medications
             ],
@@ -1323,8 +1291,7 @@ class AIAgentMedicationViewSet(viewsets.ViewSet):
                 'total_active': medications.count(),
                 'total_critical': critical_meds.count(),
                 'total_doses_per_day': sum(
-                    med.schedules.filter(is_active=True).count()
-                    for med in medications
+                    len(med.dose_times) for med in medications
                 )
             }
         })

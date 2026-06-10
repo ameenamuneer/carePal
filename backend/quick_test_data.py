@@ -9,7 +9,8 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 from patients.models import PatientProfile
 from vitals.models import VitalType, VitalReading
-from medications.models import Medication, MedicationSchedule
+from medications.models import Medication
+from medications.schedule_utils import default_dose_times_for_frequency
 
 User = get_user_model()
 
@@ -62,11 +63,10 @@ def quick_setup():
         status='ACTIVE'
     )
     
-    MedicationSchedule.objects.create(
-        medication=med,
-        time_of_day='09:00:00'
-    )
-    print("✅ Medication & Schedule")
+    if not med.dose_times:
+        med.dose_times = default_dose_times_for_frequency(med.frequency)
+        med.save(update_fields=['dose_times'])
+    print("✅ Medication dose_times set")
     print("\nDONE.")
 
 if __name__ == '__main__':

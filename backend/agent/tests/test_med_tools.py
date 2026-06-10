@@ -10,7 +10,8 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "carepal.settings")
 django.setup()
 
 from agent.enhanced_function_executor import EnhancedFunctionExecutor
-from medications.models import Medication, MedicationSchedule, MedicationAdherence
+from medications.models import Medication, MedicationAdherence
+from medications.schedule_utils import default_dose_times_for_frequency
 from patients.models import PatientProfile
 from django.contrib.auth import get_user_model
 
@@ -46,13 +47,11 @@ def test_medication_tools():
             }
         )
         
-        # Create Schedule
-        schedule, _ = MedicationSchedule.objects.get_or_create(
-            medication=med,
-            time_label="Morning",
-            defaults={'time_of_day': '08:00', 'is_active': True}
-        )
-        
+        # Ensure dose_times are set
+        if not med.dose_times:
+            med.dose_times = default_dose_times_for_frequency(med.frequency or 'ONCE_DAILY')
+            med.save(update_fields=['dose_times'])
+
         # Ensure no existing adherence for today to start fresh
         MedicationAdherence.objects.filter(
             medication=med,

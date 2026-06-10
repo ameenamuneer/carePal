@@ -19,7 +19,8 @@ import uuid
 from django.contrib.auth import get_user_model
 from patients.models import PatientProfile, HealthCondition
 from vitals.models import VitalType, VitalReading, DataSource
-from medications.models import Medication, MedicationSchedule
+from medications.models import Medication
+from medications.schedule_utils import default_dose_times_for_frequency
 from agent.models import AgentSession
 from agent.conversation_manager import IntelligentConversationManager
 
@@ -98,11 +99,9 @@ def setup_test_data():
         }
     )
     
-    schedule, _ = MedicationSchedule.objects.get_or_create(
-        medication=med,
-        time_label='MORNING',
-        defaults={'time_of_day': '08:00:00'}
-    )
+    if not med.dose_times:
+        med.dose_times = default_dose_times_for_frequency(med.frequency)
+        med.save(update_fields=['dose_times'])
 
     logger.info(f"Test data ready for: {user.get_full_name()}")
     return profile, user

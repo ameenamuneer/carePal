@@ -1,10 +1,10 @@
 from django.core.management.base import BaseCommand
 from django.utils import timezone
-from datetime import timedelta, time
+from datetime import timedelta
 from users.models import User
 from patients.models import PatientProfile
-from medications.models import Medication, MedicationSchedule
-from medications.tasks import generate_adherence_records
+from medications.models import Medication
+from medications.schedule_utils import default_dose_times_for_frequency
 
 class Command(BaseCommand):
     help = 'Populates the database with sample medication data'
@@ -51,9 +51,6 @@ class Command(BaseCommand):
                 'is_critical': True,
                 'quantity_prescribed': 30,
                 'quantity_remaining': 30,
-                'schedules': [
-                    {'time': time(8, 0), 'label': 'Morning', 'food': False}
-                ]
             },
             {
                 'medication_name': 'Metformin',
@@ -66,10 +63,6 @@ class Command(BaseCommand):
                 'is_critical': True,
                 'quantity_prescribed': 60,
                 'quantity_remaining': 60,
-                'schedules': [
-                    {'time': time(8, 0), 'label': 'Breakfast', 'food': True},
-                    {'time': time(20, 0), 'label': 'Dinner', 'food': True}
-                ]
             },
             {
                 'medication_name': 'Multivitamin',
@@ -82,36 +75,21 @@ class Command(BaseCommand):
                 'is_critical': False,
                 'quantity_prescribed': 90,
                 'quantity_remaining': 90,
-                'schedules': [
-                    {'time': time(12, 0), 'label': 'Lunch', 'food': True}
-                ]
             }
         ]
 
         for med_data in medications_data:
-            schedules_data = med_data.pop('schedules')
-            
             med, created = Medication.objects.get_or_create(
                 patient=patient,
                 medication_name=med_data['medication_name'],
                 defaults=med_data
             )
-            
+
             if created:
+                # Auto-populate dose_times from frequency
+                med.dose_times = default_dose_times_for_frequency(med.frequency)
+                med.save(update_fields=['dose_times'])
                 self.stdout.write(f'Created medication: {med.medication_name}')
-                
-                # Create schedules
-                for sch in schedules_data:
-                    MedicationSchedule.objects.create(
-                        medication=med,
-                        time_of_day=sch['time'],
-                        time_label=sch['label'],
-                        with_food=sch['food']
-                    )
-                
-                # Generate adherence records
-                self.stdout.write(f'Generating adherence records for {med.medication_name}...')
-                generate_adherence_records(med.id, days=7)
             else:
                 self.stdout.write(f'Medication already exists: {med.medication_name}')
 
