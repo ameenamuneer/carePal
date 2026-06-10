@@ -1,7 +1,7 @@
 # CarePal Backend — Remote Viewer & Live AI Enhancement Spec
 
-**Version:** 1.0  
-**Date:** 2026-06-03  
+**Version:** 1.1  
+**Date:** 2026-06-10  
 **Scope:** Django 4.2 backend at `backend/`  
 **Tech stack:** Django 4.2, DRF, Django Channels (WebSocket), Celery + Redis, PostgreSQL, Gemini Live API (gemini-2.5-flash-native-audio-preview)
 
@@ -10,7 +10,7 @@
 ## Table of Contents
 
 1. [Access Control & Account Types](#1-access-control--account-types)
-2. [Medication Logging via Live AI](#2-medication-logging-via-live-ai)
+2. [Medication Adherence via Medication Monitor Agent](#2-medication-adherence-via-medication-monitor-agent)
 3. [Nutrition Logging (Structured)](#3-nutrition-logging-structured)
 4. [Mood Logging (Structured)](#4-mood-logging-structured)
 5. [Escalation Timeline](#5-escalation-timeline)
@@ -260,141 +260,611 @@ await self.channel_layer.group_send(
 
 ---
 
-## 2. Medication Logging via Live AI
+## 2. Medication Adherence via Medication Monitor Agent
 
-### Current State
+### Architecture Decision
 
-`mark_medication_taken` and `mark_medication_skipped` exist in `backend/agent/enhanced_function_definitions.py` but are **not** declared in `live_consumer.py`'s tool list. The existing `log_patient_activity` handler does not touch `MedicationAdherence`.
+Rather than adding more tool calls to the Gemini Live AI session, medication adherence is handled by a **dedicated secondary agent** — the Medication Monitor Agent — that runs asynchronously in the Celery worker pool. 
 
----
+**Why this is better than giving Live AI more tools:**
+- Live AI is a real-time conversational stream; adding DB-write tool calls increases latency and failure surface mid-conversation
+- The secondary agent has its own full context window: it can read today's full schedule, all of today's adherence records, and recent medication logs before deciding what to write
+- Prevents duplicate marking — if a patient mentions the same medication twice, the agent checks existing adherence records before acting
+- Cleanly separates concerns: Live AI captures what was said, the Monitor Agent decides what it means
 
-### 2.1 Tool Declarations
+**Flow:**
 
-**File:** `backend/agent/live_consumer.py`
-
-Inside `run_gemini_session()`, add two new `types.FunctionDeclaration` entries to the existing `tools` list alongside `adjust_camera`, `record_vital_reading`, and `log_patient_activity`:
-
-```python
-types.FunctionDeclaration(
-    name="mark_medication_taken",
-    description=(
-        "Record that the patient has taken a specific medication. "
-        "Call this when the patient verbally confirms they have taken or just took a medication. "
-        "Do not call unless the patient explicitly confirms — do not assume."
-    ),
-    parameters=types.Schema(
-        type="OBJECT",
-        properties={
-            "medication_name": types.Schema(
-                type="STRING",
-                description="Name of the medication as it appears in their schedule (e.g. 'Metformin 500mg')."
-            ),
-            "notes": types.Schema(
-                type="STRING",
-                description="Optional notes, e.g. 'taken with food', 'patient said they took it an hour ago'."
-            ),
-        },
-        required=["medication_name"]
-    )
-),
-types.FunctionDeclaration(
-    name="mark_medication_skipped",
-    description=(
-        "Record that the patient has explicitly refused or skipped a scheduled medication. "
-        "Call this when the patient says they are not taking a medication or have decided to skip it. "
-        "Do not call for missed doses — only for explicit patient refusal."
-    ),
-    parameters=types.Schema(
-        type="OBJECT",
-        properties={
-            "medication_name": types.Schema(
-                type="STRING",
-                description="Name of the medication being skipped."
-            ),
-            "notes": types.Schema(
-                type="STRING",
-                description="Optional reason given by patient."
-            ),
-        },
-        required=["medication_name"]
-    )
-),
+```
+Patient talks to Gemini Live
+        │
+        ▼
+log_patient_activity(activity_type='MEDICATION') fires
+        │
+        ▼
+PatientActivityLog saved to DB
+        │
+Django post_save signal (agent/signals.py)
+        │
+        ▼
+Celery task: process_medication_log.delay(log_id)
+        │
+        ▼
+┌─────────────────────────────────────────┐
+│       Medication Monitor Agent          │
+│       (gemini-2.0-flash, text only)     │
+│                                         │
+│  Context provided:                      │
+│  - The activity log entry (description) │
+│  - Patient's full active med schedule   │
+│  - Today's adherence records so far     │
+│  - Last 3 MEDICATION activity logs      │
+│                                         │
+│  Tools available:                       │
+│  - update_adherence                     │
+│  - request_clarification                │
+│  - do_nothing                           │
+└─────────────────────────────────────────┘
+        │
+        ▼
+DB updated (MedicationAdherence) with source=MONITOR_AGENT
++ audit trail linking back to triggering PatientActivityLog
 ```
 
 ---
 
-### 2.2 Tool Call Dispatch
+### 2.1 Live AI: System Prompt Update Only
+
+The Live AI's only responsibility is to **ask about medications periodically and log what the patient says** using the existing `log_patient_activity` tool with `activity_type='MEDICATION'`. No new tool calls needed on the Live AI side.
 
 **File:** `backend/agent/live_consumer.py`
 
-In the `for fc in function_calls:` loop (around line 628), add:
+In the `system_instruction` string, add to the **Rules** section:
 
-```python
-elif fc.name == "mark_medication_taken":
-    asyncio.create_task(self.handle_mark_medication_taken(fc_args, fc_id))
-elif fc.name == "mark_medication_skipped":
-    asyncio.create_task(self.handle_mark_medication_skipped(fc_args, fc_id))
+```
+Medication Check-ins:
+- Periodically ask the patient about their medication schedule based on the time of day.
+  For example, in the morning ask if they have taken their morning medications.
+- When the patient says anything about medications — taken, skipped, unsure, side effects,
+  or mentions a medication by name — immediately call log_patient_activity with
+  activity_type='MEDICATION'. Capture exactly what they said in the description field.
+- Do not attempt to interpret or judge adherence yourself. Just log faithfully.
+- Examples of what to log: "Patient said they took Metformin after breakfast",
+  "Patient said they haven't taken their evening blood pressure pill yet",
+  "Patient mentioned feeling dizzy after taking their medication",
+  "Patient said they skipped their noon dose because they forgot".
+- Do not ask about medications more than once per scheduled time window
+  (morning / afternoon / evening / night).
 ```
 
 ---
 
-### 2.3 Handler Methods
+### 2.2 Model Change — `confirmation_method` on `MedicationAdherence`
+
+**File:** `backend/medications/models.py`
+
+Check if `MedicationAdherence` already has a `confirmation_method` field. If not, add:
+
+```python
+CONFIRMATION_METHOD_CHOICES = [
+    ('DEVICE', 'Smart Device'),
+    ('MANUAL', 'Manual Entry'),
+    ('AI_VERBAL', 'AI Verbal Confirmation'),
+    ('MONITOR_AGENT', 'Medication Monitor Agent'),
+    ('FAMILY', 'Family Reported'),
+]
+confirmation_method = models.CharField(
+    max_length=20,
+    choices=CONFIRMATION_METHOD_CHOICES,
+    default='MANUAL',
+    blank=True,
+)
+# Link back to the activity log that triggered this update — audit trail
+source_activity_log = models.ForeignKey(
+    'agent.PatientActivityLog',
+    on_delete=models.SET_NULL,
+    null=True,
+    blank=True,
+    related_name='adherence_updates',
+    help_text="The activity log entry that caused this adherence record to be written.",
+)
+```
+
+Run: `python manage.py makemigrations medications`
+
+---
+
+### 2.3 Pending Clarification Queue — Reusable Model
+
+This model is used by the Monitor Agent (and any future agent) to push a follow-up question back into the Live AI's next session. It is **reusable** — any backend process can insert a row, and the Live AI checks for pending items at the start of each session.
+
+**File:** `backend/agent/models.py`
+
+Add alongside existing models:
+
+```python
+class PendingQuestion(models.Model):
+    """
+    A question or prompt queued by a backend agent or process to be
+    asked by the Live AI during the patient's next session.
+
+    Reusable: any backend agent inserts a row here. The Live AI
+    reads and clears pending questions at session start.
+    """
+    SOURCE_CHOICES = [
+        ('MEDICATION_AGENT', 'Medication Monitor Agent'),
+        ('SYSTEM', 'System'),
+        ('DOCTOR', 'Doctor'),
+        ('FAMILY', 'Family Member'),
+    ]
+
+    patient = models.ForeignKey(
+        'patients.PatientProfile',
+        on_delete=models.CASCADE,
+        related_name='pending_questions',
+    )
+    question = models.TextField(
+        help_text="The exact question or prompt to inject into the Live AI session."
+    )
+    context = models.TextField(
+        blank=True,
+        help_text="Internal context for why this question is being asked. "
+                  "Not shown to the patient — used to help the AI frame the question naturally."
+    )
+    source = models.CharField(max_length=30, choices=SOURCE_CHOICES, default='SYSTEM')
+    source_object_type = models.CharField(
+        max_length=50, blank=True,
+        help_text="Optional: model name of the object that triggered this question."
+    )
+    source_object_id = models.IntegerField(
+        null=True, blank=True,
+        help_text="Optional: PK of the triggering object for audit trail."
+    )
+    priority = models.IntegerField(
+        default=5,
+        help_text="1 = highest priority (ask first), 10 = lowest. "
+                  "Live AI asks pending questions in priority order."
+    )
+    asked = models.BooleanField(default=False)
+    asked_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text="If the question is still pending after this time, discard it."
+    )
+
+    class Meta:
+        db_table = 'pending_questions'
+        ordering = ['priority', 'created_at']
+
+    def __str__(self):
+        return f"[{self.source}] {self.question[:60]}"
+```
+
+Run: `python manage.py makemigrations agent`
+
+---
+
+### 2.4 Live AI: Load Pending Questions at Session Start
 
 **File:** `backend/agent/live_consumer.py`
 
-Add these two async handler methods to `GeminiLiveConsumer`:
+After the patient is authenticated and `self.patient` is set in `connect()`, fetch any pending questions and inject them into the session's system context.
 
 ```python
-async def handle_mark_medication_taken(self, args: dict, fc_id):
-    result = await self._update_medication_adherence(
-        args.get('medication_name', ''),
-        'TAKEN',
-        args.get('notes', '')
+@database_sync_to_async
+def _get_pending_questions(self):
+    from django.utils import timezone
+    from .models import PendingQuestion
+    now = timezone.now()
+    return list(
+        PendingQuestion.objects.filter(
+            patient=self.patient,
+            asked=False,
+        ).filter(
+            models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=now)
+        ).order_by('priority', 'created_at')
     )
-    if self.session:
-        await self.session.send(
-            types.FunctionResponse(id=fc_id, name="mark_medication_taken", response=result)
-        )
-
-async def handle_mark_medication_skipped(self, args: dict, fc_id):
-    result = await self._update_medication_adherence(
-        args.get('medication_name', ''),
-        'SKIPPED',
-        args.get('notes', '')
-    )
-    if self.session:
-        await self.session.send(
-            types.FunctionResponse(id=fc_id, name="mark_medication_skipped", response=result)
-        )
 
 @database_sync_to_async
-def _update_medication_adherence(self, medication_name: str, status: str, notes: str) -> dict:
+def _mark_questions_asked(self, question_ids):
+    from django.utils import timezone
+    from .models import PendingQuestion
+    PendingQuestion.objects.filter(id__in=question_ids).update(
+        asked=True,
+        asked_at=timezone.now(),
+    )
+```
+
+In `run_gemini_session()`, after building `system_instruction`, append pending questions:
+
+```python
+pending = await self._get_pending_questions()
+if pending:
+    question_block = "\n\nPENDING FOLLOW-UP QUESTIONS (ask these naturally early in the session):\n"
+    for pq in pending:
+        question_block += f"- {pq.question}"
+        if pq.context:
+            question_block += f"  [Context for you only: {pq.context}]"
+        question_block += "\n"
+    system_instruction += question_block
+    await self._mark_questions_asked([pq.id for pq in pending])
+```
+
+---
+
+### 2.5 Django Signal — Trigger Celery Task on MEDICATION Log
+
+**File:** `backend/agent/signals.py` (create new file)
+
+```python
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+from .models import PatientActivityLog
+
+
+@receiver(post_save, sender=PatientActivityLog)
+def on_activity_log_saved(sender, instance, created, **kwargs):
+    if created and instance.activity_type == 'MEDICATION':
+        from .tasks import process_medication_log
+        process_medication_log.delay(instance.id)
+```
+
+**File:** `backend/agent/apps.py` — register the signal:
+
+```python
+class AgentConfig(AppConfig):
+    name = 'agent'
+
+    def ready(self):
+        import agent.signals  # noqa
+```
+
+---
+
+### 2.6 Celery Task
+
+**File:** `backend/agent/tasks.py` (add to existing tasks or create new file)
+
+```python
+@shared_task(bind=True, max_retries=3, default_retry_delay=30)
+def process_medication_log(self, activity_log_id: int):
+    """
+    Triggered whenever a MEDICATION activity log is saved.
+    Calls the Medication Monitor Agent to interpret the log
+    and update adherence records if appropriate.
+    """
+    try:
+        from .models import PatientActivityLog
+        log = PatientActivityLog.objects.select_related(
+            'patient__user'
+        ).get(id=activity_log_id)
+        
+        from .medication_monitor_agent import MedicationMonitorAgent
+        agent = MedicationMonitorAgent()
+        agent.process(log)
+
+    except PatientActivityLog.DoesNotExist:
+        logger.warning(f"process_medication_log: log {activity_log_id} not found")
+    except Exception as exc:
+        logger.error(f"process_medication_log failed: {exc}")
+        raise self.retry(exc=exc)
+```
+
+---
+
+### 2.7 Medication Monitor Agent
+
+**File:** `backend/agent/medication_monitor_agent.py` (new file)
+
+This is a standard (non-streaming) Gemini text call. It receives full context, reasons about it, and calls one of three tools.
+
+#### Context builder
+
+```python
+def _build_context(self, log: PatientActivityLog) -> str:
     from medications.models import Medication, MedicationAdherence, MedicationSchedule
     from datetime import date
 
-    try:
-        patient = PatientProfile.objects.filter(user=self.user).first()
-        if not patient:
-            return {"success": False, "error": "No patient profile"}
+    patient = log.patient
+    today = date.today()
 
-        # Find medication by name (case-insensitive)
-        med = Medication.objects.filter(
-            patient=patient,
-            medication_name__iexact=medication_name,
-            status='ACTIVE'
-        ).first()
-        if not med:
-            # Fuzzy fallback: contains match
-            med = Medication.objects.filter(
+    # 1. Active medications + their schedules
+    meds = Medication.objects.filter(
+        patient=patient, status='ACTIVE'
+    ).prefetch_related('schedules')
+
+    med_lines = []
+    for med in meds:
+        schedules = MedicationSchedule.objects.filter(
+            medication=med, is_active=True
+        ).values_list('time_of_day', flat=True)
+        times = ', '.join(str(t) for t in schedules) or 'no fixed time'
+        med_lines.append(
+            f"  - {med.medication_name} | dose: {med.dosage} | "
+            f"times: {times} | frequency: {med.frequency}"
+        )
+
+    # 2. Today's adherence records already written
+    adherence_today = MedicationAdherence.objects.filter(
+        medication__patient=patient,
+        scheduled_date=today,
+    ).select_related('medication')
+
+    adherence_lines = []
+    for a in adherence_today:
+        adherence_lines.append(
+            f"  - {a.medication.medication_name}: {a.status} "
+            f"(recorded at {a.actual_datetime}, method: {a.confirmation_method})"
+        )
+
+    # 3. Last 3 MEDICATION activity logs (excluding current)
+    recent_logs = PatientActivityLog.objects.filter(
+        patient=patient,
+        activity_type='MEDICATION',
+    ).exclude(id=log.id).order_by('-observed_at')[:3]
+
+    recent_lines = [
+        f"  - [{r.observed_at.strftime('%H:%M')}] {r.description}"
+        for r in recent_logs
+    ]
+
+    return f"""
+PATIENT: {patient.user.get_full_name()}
+DATE: {today}
+TIME OF LOG: {log.observed_at.strftime('%Y-%m-%d %H:%M')}
+
+WHAT THE PATIENT SAID (activity log description):
+"{log.description}"
+
+ACTIVE MEDICATIONS ON SCHEDULE TODAY:
+{chr(10).join(med_lines) or '  (none)'}
+
+TODAY'S ADHERENCE RECORDS ALREADY WRITTEN:
+{chr(10).join(adherence_lines) or '  (none yet)'}
+
+RECENT MEDICATION ACTIVITY LOGS (last 3, excluding this one):
+{chr(10).join(recent_lines) or '  (none)'}
+"""
+```
+
+#### Tool definitions
+
+```python
+TOOLS = [
+    {
+        "name": "update_adherence",
+        "description": (
+            "Update or create a MedicationAdherence record for a specific medication. "
+            "Only call this when you are confident the log refers to a specific medication "
+            "on today's schedule AND that schedule slot has not already been recorded. "
+            "Do NOT call if an adherence record for this medication and time slot already exists "
+            "with status TAKEN or SKIPPED — duplication must be avoided."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "medication_name": {
+                    "type": "string",
+                    "description": "Exact or closest matching name from the active medications list."
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["TAKEN", "SKIPPED", "PARTIAL"],
+                    "description": (
+                        "TAKEN: patient confirmed they took it. "
+                        "SKIPPED: patient explicitly refused or said they are not taking it. "
+                        "PARTIAL: patient took only part of the dose."
+                    )
+                },
+                "notes": {
+                    "type": "string",
+                    "description": "Brief note summarising what the patient said."
+                },
+                "confidence": {
+                    "type": "number",
+                    "description": (
+                        "Your confidence that this action is correct, 0.0 to 1.0. "
+                        "If below 0.6, use request_clarification instead."
+                    )
+                }
+            },
+            "required": ["medication_name", "status", "confidence"]
+        }
+    },
+    {
+        "name": "request_clarification",
+        "description": (
+            "Queue a follow-up question to be asked by the Live AI in the next session. "
+            "Use this when the log is ambiguous — you cannot confidently identify which "
+            "medication was taken, whether it was taken or skipped, or when. "
+            "Do NOT use this if the log is clear enough to act on."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The question for the Live AI to ask the patient naturally."
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Internal context (not shown to patient) explaining why this is being asked."
+                },
+                "priority": {
+                    "type": "integer",
+                    "description": "1 (urgent, ask immediately) to 10 (low priority). Default 5."
+                }
+            },
+            "required": ["question", "context"]
+        }
+    },
+    {
+        "name": "do_nothing",
+        "description": (
+            "Take no action. Use this when the log does not contain enough information "
+            "to update adherence AND clarification is not warranted — for example if the "
+            "patient is simply discussing medications in general without referring to a "
+            "specific dose event, or if the log is already fully accounted for in today's "
+            "adherence records."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "Brief internal reason for taking no action."
+                }
+            },
+            "required": ["reason"]
+        }
+    }
+]
+```
+
+#### Agent system prompt
+
+```python
+SYSTEM_PROMPT = """
+You are the CarePal Medication Monitor Agent. You receive a medication-related activity log
+from a patient's conversation with the CarePal Live AI assistant, along with full context
+about the patient's medication schedule and today's adherence records.
+
+Your job is to decide ONE action:
+1. update_adherence — if you can clearly identify a specific medication dose event
+2. request_clarification — if the log is genuinely ambiguous
+3. do_nothing — if no action is needed
+
+Rules:
+- NEVER mark a medication as TAKEN/SKIPPED if today's adherence record for that
+  medication slot already has status TAKEN or SKIPPED. Check the context carefully.
+- If the patient mentions the same medication multiple times in recent logs, check
+  if adherence was already recorded before acting.
+- Prefer do_nothing over a wrong update_adherence call.
+- Only use request_clarification when the ambiguity is specific and a direct question
+  would resolve it — do not ask vague questions.
+- Match medication names loosely: "my blood pressure pill" matches if only one
+  antihypertensive is on the schedule. "my pill" alone is too vague.
+- A confidence below 0.6 on update_adherence means you should use
+  request_clarification or do_nothing instead.
+- You must call exactly one tool. Do not respond with plain text.
+"""
+```
+
+#### Full agent class
+
+```python
+import logging
+from google import genai
+from google.genai import types as gtypes
+from django.conf import settings
+
+logger = logging.getLogger(__name__)
+
+
+class MedicationMonitorAgent:
+
+    def __init__(self):
+        self.client = genai.Client(api_key=settings.GEMINI_API_KEY)
+
+    def process(self, log) -> None:
+        context = self._build_context(log)
+        response = self.client.models.generate_content(
+            model='gemini-2.0-flash',
+            contents=context,
+            config=gtypes.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                tools=[gtypes.Tool(function_declarations=[
+                    gtypes.FunctionDeclaration(**t) for t in TOOLS
+                ])],
+                tool_config=gtypes.ToolConfig(
+                    function_calling_config=gtypes.FunctionCallingConfig(
+                        mode='ANY',  # Must call a tool — no plain text responses
+                    )
+                ),
+                temperature=0.1,  # Low temperature — this is a classification task
+            ),
+        )
+
+        for part in response.candidates[0].content.parts:
+            if part.function_call:
+                self._dispatch(part.function_call, log)
+                break
+
+    def _dispatch(self, fc, log) -> None:
+        args = dict(fc.args)
+        if fc.name == 'update_adherence':
+            self._update_adherence(
+                log=log,
+                medication_name=args['medication_name'],
+                status=args['status'],
+                notes=args.get('notes', ''),
+                confidence=args.get('confidence', 1.0),
+            )
+        elif fc.name == 'request_clarification':
+            self._queue_clarification(
+                log=log,
+                question=args['question'],
+                context=args.get('context', ''),
+                priority=args.get('priority', 5),
+            )
+        elif fc.name == 'do_nothing':
+            logger.info(
+                f"[MedAgent] do_nothing for log {log.id}: {args.get('reason', '')}"
+            )
+
+    def _update_adherence(
+        self, log, medication_name: str, status: str,
+        notes: str, confidence: float
+    ) -> None:
+        from medications.models import Medication, MedicationAdherence, MedicationSchedule
+        from django.utils import timezone
+        from datetime import date
+
+        if confidence < 0.6:
+            logger.warning(
+                f"[MedAgent] Skipping update for log {log.id} — "
+                f"confidence {confidence} below threshold"
+            )
+            return
+
+        patient = log.patient
+        today = date.today()
+
+        med = (
+            Medication.objects.filter(
+                patient=patient,
+                medication_name__iexact=medication_name,
+                status='ACTIVE',
+            ).first()
+            or Medication.objects.filter(
                 patient=patient,
                 medication_name__icontains=medication_name,
-                status='ACTIVE'
+                status='ACTIVE',
             ).first()
+        )
         if not med:
-            return {"success": False, "error": f"Medication not found: {medication_name}"}
+            logger.warning(
+                f"[MedAgent] Medication not found: '{medication_name}' "
+                f"for patient {patient.id}"
+            )
+            return
 
-        today = date.today()
-        schedule = MedicationSchedule.objects.filter(medication=med).first()
+        # Duplicate guard — don't overwrite an already-decided record
+        existing = MedicationAdherence.objects.filter(
+            medication=med,
+            scheduled_date=today,
+            status__in=['TAKEN', 'SKIPPED'],
+        ).first()
+        if existing:
+            logger.info(
+                f"[MedAgent] Skipping — adherence already recorded as "
+                f"{existing.status} for {med.medication_name} today"
+            )
+            return
+
+        schedule = MedicationSchedule.objects.filter(
+            medication=med, is_active=True
+        ).first()
 
         adherence, created = MedicationAdherence.objects.get_or_create(
             medication=med,
@@ -402,53 +872,78 @@ def _update_medication_adherence(self, medication_name: str, status: str, notes:
             defaults={
                 'scheduled_time': schedule.time_of_day if schedule else None,
                 'status': status,
-                'actual_datetime': timezone.now(),
-                'confirmation_method': 'AI_VERBAL',
+                'actual_datetime': log.observed_at,
+                'confirmation_method': 'MONITOR_AGENT',
                 'notes': notes,
-            }
+                'source_activity_log': log,
+            },
         )
         if not created:
             adherence.status = status
-            adherence.actual_datetime = timezone.now()
-            adherence.confirmation_method = 'AI_VERBAL'
+            adherence.actual_datetime = log.observed_at
+            adherence.confirmation_method = 'MONITOR_AGENT'
             adherence.notes = notes
-            adherence.save(update_fields=['status', 'actual_datetime', 'confirmation_method', 'notes'])
+            adherence.source_activity_log = log
+            adherence.save(update_fields=[
+                'status', 'actual_datetime', 'confirmation_method',
+                'notes', 'source_activity_log',
+            ])
 
-        return {"success": True, "message": f"Marked {med.medication_name} as {status}"}
-    except Exception as e:
-        logger.error(f"Error updating medication adherence: {e}")
-        return {"success": False, "error": str(e)}
-```
+        logger.info(
+            f"[MedAgent] {'Created' if created else 'Updated'} adherence: "
+            f"{med.medication_name} → {status} "
+            f"(confidence={confidence}, log={log.id})"
+        )
 
-**Note:** `MedicationAdherence` must have a `confirmation_method` field. Check `backend/medications/models.py` — if it does not exist, add:
+    def _queue_clarification(
+        self, log, question: str, context: str, priority: int
+    ) -> None:
+        from .models import PendingQuestion
+        from django.utils import timezone
+        from datetime import timedelta
 
-```python
-CONFIRMATION_METHOD_CHOICES = [
-    ('DEVICE', 'Smart Device'),
-    ('MANUAL', 'Manual Entry'),
-    ('AI_VERBAL', 'AI Verbal Confirmation'),
-    ('FAMILY', 'Family Reported'),
-]
-confirmation_method = models.CharField(
-    max_length=20, choices=CONFIRMATION_METHOD_CHOICES, default='MANUAL', blank=True
-)
+        PendingQuestion.objects.create(
+            patient=log.patient,
+            question=question,
+            context=context,
+            source='MEDICATION_AGENT',
+            source_object_type='PatientActivityLog',
+            source_object_id=log.id,
+            priority=priority,
+            expires_at=timezone.now() + timedelta(hours=12),
+        )
+        logger.info(
+            f"[MedAgent] Queued clarification for log {log.id}: '{question}'"
+        )
+
+    # _build_context defined above (insert here)
 ```
 
 ---
 
-### 2.4 System Prompt Update
+### 2.8 Migrations Checklist
 
-**File:** `backend/agent/live_consumer.py`
+Run in order:
 
-In the `system_instruction` string (around line 372), add to the **Rules** section:
-
+```bash
+docker compose exec backend python manage.py makemigrations medications --name="add_confirmation_method_source_log"
+docker compose exec backend python manage.py makemigrations agent --name="add_pending_question_model"
+docker compose exec backend python manage.py migrate
 ```
-Medication Confirmation:
-- When the patient mentions they took, are taking, or have just taken a medication, call 'mark_medication_taken' immediately and silently.
-- When the patient refuses, says they are skipping, or explicitly declines a medication, call 'mark_medication_skipped'.
-- Do not confirm back to the patient that you have logged this — just do it quietly in the background.
-- Match medication names loosely — "my blood pressure pill" is sufficient context if only one BP medication is scheduled.
-```
+
+---
+
+### 2.9 Summary of Files Changed / Created
+
+| File | Change |
+|---|---|
+| `backend/medications/models.py` | Add `confirmation_method`, `source_activity_log` to `MedicationAdherence` |
+| `backend/agent/models.py` | Add `PendingQuestion` model |
+| `backend/agent/signals.py` | New — `post_save` signal on `PatientActivityLog` |
+| `backend/agent/apps.py` | Register signals in `ready()` |
+| `backend/agent/tasks.py` | Add `process_medication_log` Celery task |
+| `backend/agent/medication_monitor_agent.py` | New — full agent class |
+| `backend/agent/live_consumer.py` | System prompt update + pending question injection at session start |
 
 ---
 

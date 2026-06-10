@@ -593,7 +593,65 @@ class AgentCacheEntry(models.Model):
         self.hit_count += 1
         self.last_hit_at = timezone.now()
         self.tokens_saved += tokens_saved
-        
+
         # Calculate cost savings (Gemini 2.0 Flash pricing)
         self.cost_saved_usd += (tokens_saved / 1_000_000) * 0.075
         self.save(update_fields=['hit_count', 'last_hit_at', 'tokens_saved', 'cost_saved_usd'])
+
+
+class PendingQuestion(models.Model):
+    """
+    A question or prompt queued by a backend agent or process to be
+    asked by the Live AI during the patient's next session.
+
+    Reusable: any backend agent inserts a row here. The Live AI
+    reads and clears pending questions at session start.
+    """
+    SOURCE_CHOICES = [
+        ('MEDICATION_AGENT', 'Medication Monitor Agent'),
+        ('SYSTEM', 'System'),
+        ('DOCTOR', 'Doctor'),
+        ('FAMILY', 'Family Member'),
+    ]
+
+    patient = models.ForeignKey(
+        'patients.PatientProfile',
+        on_delete=models.CASCADE,
+        related_name='pending_questions',
+    )
+    question = models.TextField(
+        help_text="The exact question or prompt to inject into the Live AI session."
+    )
+    context = models.TextField(
+        blank=True,
+        help_text="Internal context for why this question is being asked. "
+                  "Not shown to the patient — used to help the AI frame the question naturally."
+    )
+    source = models.CharField(max_length=30, choices=SOURCE_CHOICES, default='SYSTEM')
+    source_object_type = models.CharField(
+        max_length=50, blank=True,
+        help_text="Optional: model name of the object that triggered this question."
+    )
+    source_object_id = models.IntegerField(
+        null=True, blank=True,
+        help_text="Optional: PK of the triggering object for audit trail."
+    )
+    priority = models.IntegerField(
+        default=5,
+        help_text="1 = highest priority (ask first), 10 = lowest. "
+                  "Live AI asks pending questions in priority order."
+    )
+    asked = models.BooleanField(default=False)
+    asked_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text="If the question is still pending after this time, discard it."
+    )
+
+    class Meta:
+        db_table = 'pending_questions'
+        ordering = ['priority', 'created_at']
+
+    def __str__(self):
+        return f"[{self.source}] {self.question[:60]}"

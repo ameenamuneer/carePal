@@ -58,6 +58,7 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         )
         self.pan_controller.start()
 
+        self.patient = await self._load_patient()
         self.task = asyncio.create_task(self.run_gemini_session())
         logger.info(f"Gemini Live WebSocket connected for user: {self.user}")
 
@@ -104,23 +105,44 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
             
             vitals_str = "\n".join(vitals_summary) if vitals_summary else "No recent readings"
 
-            # 2. Active Medications
+            # 2. Active Medications + today's adherence state
+            from datetime import date
+            from medications.models import MedicationAdherence
             active_meds = Medication.objects.filter(
                 patient=patient,
                 status='ACTIVE'
-            )
-            
+            ).prefetch_related('schedules')
+
+            today = date.today()
+            # Build a lookup: medication_id -> adherence status for today
+            adherence_today = MedicationAdherence.objects.filter(
+                medication__patient=patient,
+                scheduled_date=today,
+            ).select_related('medication')
+            adherence_map = {a.medication_id: a for a in adherence_today}
+
             meds_summary = []
             for m in active_meds:
-                schedule = m.schedules.first() # specific time
+                schedule = m.schedules.first()
                 time_str = f" at {schedule.time_of_day.strftime('%H:%M')}" if schedule else f" ({m.frequency})"
-                meds_summary.append(f"- {m.medication_name} {m.dosage}{time_str}")
-            
+                adherence = adherence_map.get(m.id)
+                if adherence:
+                    taken_time = (
+                        f" — {adherence.actual_datetime.strftime('%H:%M')}"
+                        if adherence.actual_datetime else ""
+                    )
+                    status_str = f" [TODAY: {adherence.status}{taken_time}]"
+                else:
+                    status_str = " [TODAY: not yet recorded]"
+                meds_summary.append(
+                    f"- {m.medication_name} {m.dosage}{time_str}{status_str}"
+                )
+
             meds_str = "\n".join(meds_summary) if meds_summary else "No active medications"
 
             return {
                 "name": patient.user.get_full_name(),
-                "age": str(patient.age) if hasattr(patient, 'age') else "Unknown", # Assuming age property
+                "age": str(patient.age) if hasattr(patient, 'age') else "Unknown",
                 "gender": patient.gender if hasattr(patient, 'gender') else "Unknown",
                 "vitals": vitals_str,
                 "medications": meds_str
@@ -172,6 +194,38 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         except Exception as e:
             logger.error(f"Error fetching recent messages: {e}")
             return "Error fetching conversation history."
+
+    @database_sync_to_async
+    def _load_patient(self):
+        if not self.user or not self.user.is_authenticated:
+            return None
+        return PatientProfile.objects.filter(user=self.user).first()
+
+    @database_sync_to_async
+    def _get_pending_questions(self):
+        from django.utils import timezone as tz
+        from django.db import models as db_models
+        from .models import PendingQuestion
+        if not hasattr(self, 'patient') or not self.patient:
+            return []
+        now = tz.now()
+        return list(
+            PendingQuestion.objects.filter(
+                patient=self.patient,
+                asked=False,
+            ).filter(
+                db_models.Q(expires_at__isnull=True) | db_models.Q(expires_at__gt=now)
+            ).order_by('priority', 'created_at')
+        )
+
+    @database_sync_to_async
+    def _mark_questions_asked(self, question_ids):
+        from django.utils import timezone as tz
+        from .models import PendingQuestion
+        PendingQuestion.objects.filter(id__in=question_ids).update(
+            asked=True,
+            asked_at=tz.now(),
+        )
 
     @database_sync_to_async
     def save_turn_messages(self, user_text, ai_text):
@@ -424,9 +478,29 @@ Activity Logging (IMPORTANT):
 - Include the actual time in observed_at if the patient mentions it.
 - Do NOT skip logging because the observation seems minor — caregivers and clinicians rely on this log.
 
+Medication Check-ins:
+- Each medication in the Active Medications list has a [TODAY: ...] tag showing its adherence state for today.
+- Only ask about medications marked [TODAY: not yet recorded]. Never ask about one already marked [TODAY: TAKEN] or [TODAY: SKIPPED] — it has already been confirmed.
+- Ask naturally based on the time of day and the medication's scheduled time. Do not ask about an evening medication at 8am.
+- When the patient says anything about medications — taken, skipped, unsure, side effects, or mentions a medication by name — immediately call log_patient_activity with activity_type='MEDICATION'. Capture exactly what they said in the description field.
+- Do not attempt to interpret or judge adherence yourself. Just log faithfully.
+- Do not ask about the same medication more than once per session.
+
 Recent conversation history:
 {recent_messages_str}
 """
+
+        # Inject any pending questions from backend agents
+        pending = await self._get_pending_questions()
+        if pending:
+            question_block = "\n\nPENDING FOLLOW-UP QUESTIONS (ask these naturally early in the session):\n"
+            for pq in pending:
+                question_block += f"- {pq.question}"
+                if pq.context:
+                    question_block += f"  [Context for you only: {pq.context}]"
+                question_block += "\n"
+            system_instruction += question_block
+            await self._mark_questions_asked([pq.id for pq in pending])
 
         # 3. Define Tools
         # Google GenAI SDK v1Beta/v2 format for tool definitions using types

@@ -332,12 +332,29 @@ class MedicationAdherence(models.Model):
     actual_datetime = models.DateTimeField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='SCHEDULED')
     
+    CONFIRMATION_METHOD_CHOICES = [
+        ('DEVICE', 'Smart Device'),
+        ('MANUAL', 'Manual Entry'),
+        ('AI_VERBAL', 'AI Verbal Confirmation'),
+        ('MONITOR_AGENT', 'Medication Monitor Agent'),
+        ('FAMILY', 'Family Reported'),
+    ]
+
     # Confirmation
     confirmed_by_patient = models.BooleanField(default=False)
     confirmation_method = models.CharField(
-        max_length=50,
+        max_length=20,
+        choices=CONFIRMATION_METHOD_CHOICES,
+        default='MANUAL',
         blank=True,
-        help_text="'voice', 'app', 'manual_entry', 'auto_detected'"
+    )
+    source_activity_log = models.ForeignKey(
+        'agent.PatientActivityLog',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='adherence_updates',
+        help_text="The activity log entry that caused this adherence record to be written.",
     )
     
     # Reasons
