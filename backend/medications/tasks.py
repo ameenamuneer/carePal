@@ -33,40 +33,36 @@ def prepare_next_day_medications():
     logger.info(f"[MEDICATION] Preparing records for {tomorrow}")
     
     # Get all active medications that should have doses tomorrow
+    from .schedule_utils import get_times_for_medication
+
     active_meds = Medication.objects.filter(
         status='ACTIVE',
         start_date__lte=tomorrow
     ).filter(
         Q(end_date__isnull=True) | Q(end_date__gte=tomorrow)
-    ).prefetch_related('schedules')
-    
+    )
+
     created_count = 0
     skipped_count = 0
-    
+
     for medication in active_meds:
-        for schedule in medication.schedules.filter(is_active=True):
-            # Check day of week filter
-            if schedule.days_of_week and tomorrow.weekday() not in schedule.days_of_week:
-                skipped_count += 1
-                continue
-            
-            # Create scheduled datetime for tomorrow
-            scheduled_datetime = timezone.make_aware(
-                datetime.combine(tomorrow, schedule.time_of_day)
-            )
-            
-            # Create tomorrow's adherence record
-            adherence, created = MedicationAdherence.objects.get_or_create(
+        times = get_times_for_medication(medication)  # uses dose_times if set
+        if not times:
+            skipped_count += 1
+            continue
+
+        for t, _label in times:
+            scheduled_datetime = timezone.make_aware(datetime.combine(tomorrow, t))
+            _record, created = MedicationAdherence.objects.get_or_create(
                 medication=medication,
-                schedule=schedule,
                 scheduled_date=tomorrow,
+                scheduled_time=t,
                 defaults={
-                    'scheduled_time': schedule.time_of_day,
                     'scheduled_datetime': scheduled_datetime,
-                    'status': 'SCHEDULED'
-                }
+                    'status': 'SCHEDULED',
+                    'schedule': None,
+                },
             )
-            
             if created:
                 created_count += 1
     
@@ -87,75 +83,68 @@ def prepare_next_day_medications():
 @shared_task
 def generate_adherence_records(medication_id, days=7):
     """
-    Generate adherence records on-demand
-    
+    Pre-generate adherence records for a medication over the next N days.
+
+    Uses the dynamic schedule (frequency → times) — no MedicationSchedule rows needed.
+    get_or_create is used so re-running is always safe and past records are untouched.
+
     Called when:
-    - Medication created
-    - Schedule updated
+    - Medication created (via views.py)
+    - Medication frequency/dates updated (regenerate_adherence_records)
     - AI agent requests historical backfill
-    
-    Not called periodically - AI agent handles daily operations
     """
+    from .schedule_utils import get_times_for_medication
+
     try:
         medication = Medication.objects.get(id=medication_id)
-        
+
         if medication.status != 'ACTIVE':
             logger.info(f"[MEDICATION] Skipping inactive medication {medication_id}")
             return 0
-        
+
         today = timezone.now().date()
         start_date = max(today, medication.start_date)
-        
+
         if medication.end_date:
             end_date = min(medication.end_date, start_date + timedelta(days=days))
         else:
             end_date = start_date + timedelta(days=days)
-        
+
         if end_date < start_date:
             return 0
-        
-        schedules = medication.schedules.filter(is_active=True)
-        if not schedules.exists():
-            logger.warning(f"[MEDICATION] No schedules for medication {medication_id}")
+
+        times = get_times_for_medication(medication)  # uses dose_times if set
+        if not times:
+            # AS_NEEDED or unknown frequency — no fixed schedule to generate
+            logger.info(f"[MEDICATION] No fixed times for frequency '{medication.frequency}' on med {medication_id}")
             return 0
-        
+
         created_count = 0
         current_date = start_date
-        
+
         while current_date <= end_date:
-            for schedule in schedules:
-                # Check day of week filter
-                if schedule.days_of_week and current_date.weekday() not in schedule.days_of_week:
-                    continue
-                
-                scheduled_datetime = timezone.make_aware(
-                    datetime.combine(current_date, schedule.time_of_day)
-                )
-                
-                # Create record
-                adherence, created = MedicationAdherence.objects.get_or_create(
+            for t, _label in times:
+                scheduled_dt = timezone.make_aware(datetime.combine(current_date, t))
+                _record, created = MedicationAdherence.objects.get_or_create(
                     medication=medication,
-                    schedule=schedule,
                     scheduled_date=current_date,
+                    scheduled_time=t,
                     defaults={
-                        'scheduled_time': schedule.time_of_day,
-                        'scheduled_datetime': scheduled_datetime,
-                        'status': 'SCHEDULED'
-                    }
+                        'scheduled_datetime': scheduled_dt,
+                        'status': 'SCHEDULED',
+                        'schedule': None,
+                    },
                 )
-                
                 if created:
                     created_count += 1
-            
             current_date += timedelta(days=1)
-        
+
         logger.info(
-            f"[MEDICATION] Generated {created_count} adherence records "
+            f"[MEDICATION] Pre-generated {created_count} adherence records "
             f"for medication {medication_id} ({start_date} to {end_date})"
         )
-        
         return created_count
-        
+
     except Medication.DoesNotExist:
         logger.error(f"[MEDICATION] Medication {medication_id} not found")
         return 0

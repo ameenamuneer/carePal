@@ -105,37 +105,55 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
             
             vitals_str = "\n".join(vitals_summary) if vitals_summary else "No recent readings"
 
-            # 2. Active Medications + today's adherence state
+            # 2. Active Medications + today's adherence state (dynamic schedule)
             from datetime import date
             from medications.models import MedicationAdherence
-            active_meds = Medication.objects.filter(
-                patient=patient,
-                status='ACTIVE'
-            ).prefetch_related('schedules')
+            from medications.schedule_utils import get_schedule_for_date, get_times_for_frequency
 
             today = date.today()
-            # Build a lookup: medication_id -> adherence status for today
+
+            # Ensure adherence rows exist for today, then build a lookup
+            # keyed by (medication_id, scheduled_time)
             adherence_today = MedicationAdherence.objects.filter(
                 medication__patient=patient,
                 scheduled_date=today,
             ).select_related('medication')
-            adherence_map = {a.medication_id: a for a in adherence_today}
+            adherence_map: dict = {}
+            for a in adherence_today:
+                adherence_map.setdefault(a.medication_id, []).append(a)
+
+            active_meds = Medication.objects.filter(
+                patient=patient,
+                status='ACTIVE',
+                start_date__lte=today,
+            ).filter(
+                __import__('django').db.models.Q(end_date__isnull=True) |
+                __import__('django').db.models.Q(end_date__gte=today)
+            )
 
             meds_summary = []
             for m in active_meds:
-                schedule = m.schedules.first()
-                time_str = f" at {schedule.time_of_day.strftime('%H:%M')}" if schedule else f" ({m.frequency})"
-                adherence = adherence_map.get(m.id)
-                if adherence:
-                    taken_time = (
-                        f" — {adherence.actual_datetime.strftime('%H:%M')}"
-                        if adherence.actual_datetime else ""
-                    )
-                    status_str = f" [TODAY: {adherence.status}{taken_time}]"
+                times = get_times_for_frequency(m.frequency)
+                if times:
+                    times_str = ", ".join(f"{t.strftime('%H:%M')} ({label})" for t, label in times)
+                else:
+                    times_str = m.frequency
+
+                records = adherence_map.get(m.id, [])
+                if records:
+                    statuses = []
+                    for rec in sorted(records, key=lambda r: r.scheduled_time):
+                        taken_time = (
+                            f" — {rec.actual_datetime.strftime('%H:%M')}"
+                            if rec.actual_datetime else ""
+                        )
+                        statuses.append(f"{rec.status}{taken_time}")
+                    status_str = f" [TODAY: {' | '.join(statuses)}]"
                 else:
                     status_str = " [TODAY: not yet recorded]"
+
                 meds_summary.append(
-                    f"- {m.medication_name} {m.dosage}{time_str}{status_str}"
+                    f"- {m.medication_name} {m.dosage} @ {times_str}{status_str}"
                 )
 
             meds_str = "\n".join(meds_summary) if meds_summary else "No active medications"
@@ -481,10 +499,15 @@ Activity Logging (IMPORTANT):
 Medication Check-ins:
 - Each medication in the Active Medications list has a [TODAY: ...] tag showing its adherence state for today.
 - Only ask about medications marked [TODAY: not yet recorded]. Never ask about one already marked [TODAY: TAKEN] or [TODAY: SKIPPED] — it has already been confirmed.
-- Ask naturally based on the time of day and the medication's scheduled time. Do not ask about an evening medication at 8am.
+- Ask naturally based on the time of day and the medication's scheduled time (shown next to each medication). Do not ask about an evening medication at 8am.
 - When the patient says anything about medications — taken, skipped, unsure, side effects, or mentions a medication by name — immediately call log_patient_activity with activity_type='MEDICATION'. Capture exactly what they said in the description field.
 - Do not attempt to interpret or judge adherence yourself. Just log faithfully.
 - Do not ask about the same medication more than once per session.
+
+Medication Timing Preferences:
+- If the patient expresses a desire to permanently change WHEN they take a medication (e.g. "I'd like to take my morning pill at 7am from now on", "Can we move my evening dose to 9pm?"), acknowledge it warmly and log it immediately with activity_type='MEDICATION'. Include their exact preference in the description, e.g. "Patient requested to change Meftal Forte morning dose from 08:00 to 07:00 permanently."
+- The backend Medication Monitor Agent will process this log and update the schedule automatically.
+- Do NOT tell the patient you are logging it or that a backend agent will process it. Just say something like "I've noted that — your schedule will be updated."
 
 Recent conversation history:
 {recent_messages_str}

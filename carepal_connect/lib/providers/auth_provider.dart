@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../services/auth_service.dart';
 import 'patient_provider.dart';
 import 'activity_log_provider.dart';
+import 'medication_provider.dart';
 
 class AuthProvider with ChangeNotifier {
   final AuthService _authService = AuthService();
@@ -10,16 +11,22 @@ class AuthProvider with ChangeNotifier {
   // Set once from main.dart after the provider tree is built.
   PatientProvider? _patientProvider;
   ActivityLogProvider? _activityLogProvider;
+  MedicationProvider? _medicationProvider;
 
   void bindDependentProviders(
-      PatientProvider patientProvider, ActivityLogProvider activityLogProvider) {
+    PatientProvider patientProvider,
+    ActivityLogProvider activityLogProvider,
+    MedicationProvider medicationProvider,
+  ) {
     _patientProvider = patientProvider;
     _activityLogProvider = activityLogProvider;
+    _medicationProvider = medicationProvider;
   }
 
   void _clearDependentProviders() {
     _patientProvider?.clear();
     _activityLogProvider?.clear();
+    _medicationProvider?.clear();
   }
 
   bool _isAuthenticated = false;

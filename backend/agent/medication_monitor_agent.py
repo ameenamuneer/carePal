@@ -11,23 +11,46 @@ You are the CarePal Medication Monitor Agent. You receive a medication-related a
 from a patient's conversation with the CarePal Live AI assistant, along with full context
 about the patient's medication schedule and today's adherence records.
 
-Your job is to decide ONE action:
-1. update_adherence — if you can clearly identify a specific medication dose event
-2. request_clarification — if the log is genuinely ambiguous
-3. do_nothing — if no action is needed
+Your job is to decide ONE action from the four available tools:
 
+1. update_adherence — patient confirmed taking or skipping a specific dose today
+2. update_medication_times — patient wants to permanently change WHEN they take a medication
+3. request_clarification — the log is genuinely ambiguous; queue a question for Live AI
+4. do_nothing — not enough information and clarification is not warranted
+
+## Deciding which tool to use
+
+### update_adherence
+Use when the patient has clearly stated they took or skipped a specific dose TODAY.
+- Check the adherence context: if that slot is already TAKEN or SKIPPED, use do_nothing.
+- Confidence must be ≥ 0.6 or use request_clarification instead.
+
+### update_medication_times
+Use ONLY when the patient expresses a PERMANENT preference to change dose timing.
+Examples that qualify:
+  "I want to take my morning pill at 7am from now on"
+  "Can we move my evening dose to 9pm?"
+  "I prefer taking Meftal at night instead of morning"
+Examples that do NOT qualify (one-off lateness, not a preference change):
+  "I took it a bit late today"
+  "I forgot to take it this morning"
 Rules:
-- NEVER mark a medication as TAKEN/SKIPPED if today's adherence record for that
-  medication slot already has status TAKEN or SKIPPED. Check the context carefully.
-- If the patient mentions the same medication multiple times in recent logs, check
-  if adherence was already recorded before acting.
-- Prefer do_nothing over a wrong update_adherence call.
-- Only use request_clarification when the ambiguity is specific and a direct question
-  would resolve it — do not ask vague questions.
-- Match medication names loosely: "my blood pressure pill" matches if only one
-  antihypertensive is on the schedule. "my pill" alone is too vague.
-- A confidence below 0.6 on update_adherence means you should use
-  request_clarification or do_nothing instead.
+  - The new_times list length must match the medication's frequency
+    (TWICE_DAILY needs exactly 2 times, ONCE_DAILY needs 1, etc.)
+  - Times in HH:MM 24-hour format.
+  - Past adherence records are NEVER affected — only future schedule calculations change.
+
+### request_clarification
+Use when the log is ambiguous AND a specific direct question would resolve it.
+Do NOT use for vague uncertainty. Only queue questions that are genuinely necessary.
+
+### do_nothing
+Use when the log contains no actionable medication event and clarification is unwarranted.
+
+## General rules
+- Match medication names loosely: "my blood pressure pill" → the antihypertensive on schedule.
+  "my pill" alone with multiple medications → too vague → request_clarification.
+- NEVER modify past records. NEVER act on logs from previous days.
 - You must call exactly one tool. Do not respond with plain text.
 """
 
@@ -97,6 +120,49 @@ TOOLS = [
                 }
             },
             "required": ["question", "context"]
+        }
+    },
+    {
+        "name": "update_medication_times",
+        "description": (
+            "Update the preferred dosing times for a specific medication. "
+            "Use this ONLY when the patient has clearly expressed a desire to permanently change "
+            "the time they take a medication (e.g. 'I want to take my morning pill at 7am instead of 8am'). "
+            "This updates the medication's stored dose_times. Future schedule calculations will use the new times. "
+            "Past adherence records are NEVER modified. "
+            "Do NOT use this for one-off late/missed doses — use update_adherence for those."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "medication_name": {
+                    "type": "string",
+                    "description": "Exact or closest matching name from the active medications list."
+                },
+                "new_times": {
+                    "type": "array",
+                    "description": "New dosing times. Must match the medication's frequency (e.g. TWICE_DAILY needs 2 times).",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "time": {
+                                "type": "string",
+                                "description": "HH:MM in 24-hour format, e.g. '07:00'"
+                            },
+                            "label": {
+                                "type": "string",
+                                "description": "Human-readable label, e.g. 'Morning', 'Evening', 'With dinner'"
+                            }
+                        },
+                        "required": ["time", "label"]
+                    }
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Brief note explaining the change (patient preference, doctor instruction, etc.)"
+                }
+            },
+            "required": ["medication_name", "new_times"]
         }
     },
     {
@@ -207,6 +273,13 @@ class MedicationMonitorAgent:
                 context=args.get('context', ''),
                 priority=int(args.get('priority', 5)),
             )
+        elif fc.name == 'update_medication_times':
+            self._update_medication_times(
+                log=log,
+                medication_name=args['medication_name'],
+                new_times=list(args['new_times']),
+                reason=args.get('reason', ''),
+            )
         elif fc.name == 'do_nothing':
             logger.info(f"[MedAgent] do_nothing for log {log.id}: {args.get('reason', '')}")
 
@@ -283,6 +356,53 @@ class MedicationMonitorAgent:
             f"{med.medication_name} → {status} (confidence={confidence}, log={log.id})"
         )
 
+    def _update_medication_times(self, log, medication_name: str, new_times: list, reason: str) -> None:
+        """
+        Update a medication's stored dose_times based on patient preference expressed via Live AI.
+        Only affects future schedule calculations — past adherence records are untouched.
+        """
+        from medications.models import Medication
+
+        patient = log.patient
+        # Match by name (case-insensitive)
+        med = (
+            Medication.objects
+            .filter(patient=patient, status='ACTIVE')
+            .filter(medication_name__icontains=medication_name)
+            .first()
+        )
+        if not med:
+            logger.warning(f"[MedAgent] update_medication_times: no active med matching '{medication_name}' for patient {patient.id}")
+            return
+
+        # Validate: new_times must be a list of {time, label} dicts
+        validated = []
+        for entry in new_times:
+            t_str = str(entry.get('time', '')).strip()
+            label = str(entry.get('label', '')).strip()
+            # Accept HH:MM or HH:MM:SS
+            parts = t_str.split(':')
+            if len(parts) < 2:
+                logger.warning(f"[MedAgent] Invalid time entry '{entry}' — skipping")
+                continue
+            validated.append({'time': f"{int(parts[0]):02d}:{int(parts[1]):02d}", 'label': label})
+
+        if not validated:
+            logger.warning(f"[MedAgent] update_medication_times: no valid times provided for med {med.id}")
+            return
+
+        old_times = med.dose_times
+        med.dose_times = validated
+        med.save(update_fields=['dose_times', 'updated_at'])
+
+        logger.info(
+            f"[MedAgent] Updated dose_times for '{med.medication_name}' (id={med.id}) "
+            f"from {old_times} to {validated}. Reason: {reason}"
+        )
+        # No pre-generation needed — schedule is fully lazy.
+        # The next time any future date is queried, ensure_adherence_records
+        # will calculate times fresh from the updated dose_times.
+
     def _queue_clarification(self, log, question: str, context: str, priority: int) -> None:
         from .models import PendingQuestion
 
@@ -305,13 +425,13 @@ class MedicationMonitorAgent:
         patient = log.patient
         today = date.today()
 
+        from medications.schedule_utils import get_times_for_medication
+
         meds = Medication.objects.filter(patient=patient, status='ACTIVE')
         med_lines = []
         for med in meds:
-            schedules = MedicationSchedule.objects.filter(
-                medication=med, is_active=True
-            ).values_list('time_of_day', flat=True)
-            times = ', '.join(str(t) for t in schedules) or 'no fixed time'
+            times_list = get_times_for_medication(med)
+            times = ', '.join(f"{t.strftime('%H:%M')} ({label})" for t, label in times_list) or 'no fixed time'
             med_lines.append(
                 f"  - {med.medication_name} | dose: {med.dosage} | "
                 f"times: {times} | frequency: {med.frequency}"

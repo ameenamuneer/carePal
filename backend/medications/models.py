@@ -176,6 +176,17 @@ class Medication(models.Model):
         default=False,
         help_text="Critical medication - missing doses require immediate alert"
     )
+
+    # Stored dose times — list of {"time": "HH:MM", "label": "Morning"} dicts.
+    # Auto-populated from frequency on create.
+    # Can be updated by the patient (via Live AI → MedicationMonitorAgent)
+    # without affecting any past adherence records.
+    dose_times = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='[{"time":"08:00","label":"Morning"}, ...] Auto-set from frequency. Editable per patient preference.'
+    )
+
     created_by = models.ForeignKey(
         User,
         on_delete=models.SET_NULL,

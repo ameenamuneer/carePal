@@ -23,7 +23,7 @@ class FamilyMemberSerializer(serializers.ModelSerializer):
             'id', 'user', 'user_name', 'user_email', 'user_phone',
             'patient', 'patient_name', 'relationship', 'relationship_details',
             'access_level', 'can_view_vitals', 'can_view_medications',
-            'can_view_alerts', 'can_view_medical_history',
+            'can_view_activity_log', 'can_view_alerts', 'can_view_medical_history',
             'can_acknowledge_alerts', 'can_add_notes',
             'can_manage_medications', 'can_invite_others',
             'is_primary_caregiver', 'is_emergency_contact', 'is_active',
@@ -38,15 +38,17 @@ class FamilyMemberSerializer(serializers.ModelSerializer):
 
 class FamilyMemberListSerializer(serializers.ModelSerializer):
     """Lightweight serializer for listing family members"""
-    
+
     user_name = serializers.CharField(source='user.get_full_name', read_only=True)
     patient_name = serializers.CharField(source='patient.user.get_full_name', read_only=True)
-    
+
     class Meta:
         model = FamilyMember
         fields = [
-            'id', 'user_name', 'patient_name', 'relationship',
-            'access_level', 'is_primary_caregiver', 'is_active'
+            'id', 'user', 'user_name', 'patient', 'patient_name',
+            'relationship', 'access_level', 'is_primary_caregiver', 'is_active',
+            'can_view_vitals', 'can_view_medications', 'can_view_activity_log',
+            'can_view_alerts', 'can_acknowledge_alerts',
         ]
 
 

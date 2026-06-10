@@ -5,6 +5,7 @@ import 'services/api_service.dart';
 import 'providers/auth_provider.dart';
 import 'providers/patient_provider.dart';
 import 'providers/activity_log_provider.dart';
+import 'providers/medication_provider.dart';
 import 'screens/login_screen.dart';
 import 'screens/home_screen.dart';
 import 'core/app_theme.dart';
@@ -25,9 +26,11 @@ void main() async {
       final authProvider = AuthProvider();
       final patientProvider = PatientProvider();
       final activityLogProvider = ActivityLogProvider();
+      final medicationProvider = MedicationProvider();
 
       // Bind sibling providers so AuthProvider can clear them on session change.
-      authProvider.bindDependentProviders(patientProvider, activityLogProvider);
+      authProvider.bindDependentProviders(
+          patientProvider, activityLogProvider, medicationProvider);
 
       runApp(
         MultiProvider(
@@ -35,6 +38,7 @@ void main() async {
             ChangeNotifierProvider.value(value: authProvider),
             ChangeNotifierProvider.value(value: patientProvider),
             ChangeNotifierProvider.value(value: activityLogProvider),
+            ChangeNotifierProvider.value(value: medicationProvider),
           ],
           child: const CarePalConnectApp(),
         ),
@@ -84,7 +88,14 @@ class _AuthGateState extends State<_AuthGate> {
       final userType = authProvider.userType;
       // Only allow DOCTOR or FAMILY accounts
       if (userType == 'DOCTOR' || userType == 'FAMILY') {
-        await context.read<PatientProvider>().loadLinks(userType);
+        final patientProv = context.read<PatientProvider>();
+        await patientProv.loadLinks(userType);
+        // Pre-load medications for the initially active patient
+        if (patientProv.activePatientId != null) {
+          context
+              .read<MedicationProvider>()
+              .setPatientAndReload(patientProv.activePatientId);
+        }
       } else {
         // Wrong account type — force logout
         await authProvider.logout();

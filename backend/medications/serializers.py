@@ -1,11 +1,39 @@
 from rest_framework import serializers
 from django.utils import timezone
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dt_time
 from .models import (
     Medication, MedicationSchedule, MedicationAdherence,
     MedicationRefill, MedicationInteraction, MedicationAdherencePattern,
     MedicationEscalation
 )
+
+# Default schedule times for each frequency
+_FREQUENCY_DEFAULTS = {
+    'ONCE_DAILY':        [('08:00', 'Morning')],
+    'TWICE_DAILY':       [('08:00', 'Morning'), ('20:00', 'Evening')],
+    'THREE_TIMES_DAILY': [('08:00', 'Morning'), ('13:00', 'Afternoon'), ('20:00', 'Evening')],
+    'FOUR_TIMES_DAILY':  [('07:00', 'Morning'), ('12:00', 'Noon'), ('17:00', 'Afternoon'), ('22:00', 'Night')],
+    'EVERY_4_HOURS':     [(f'{h:02d}:00', f'{h:02d}:00') for h in range(6, 24, 4)],
+    'EVERY_6_HOURS':     [('06:00', '6 AM'), ('12:00', 'Noon'), ('18:00', '6 PM'), ('00:00', 'Midnight')],
+    'EVERY_8_HOURS':     [('08:00', 'Morning'), ('16:00', 'Afternoon'), ('00:00', 'Midnight')],
+    'EVERY_12_HOURS':    [('08:00', 'Morning'), ('20:00', 'Evening')],
+    'WEEKLY':            [('08:00', 'Morning')],
+    'TWICE_WEEKLY':      [('08:00', 'Morning'), ('08:00', 'Morning')],
+    'MONTHLY':           [('08:00', 'Morning')],
+    'AS_NEEDED':         [],   # no fixed schedule
+}
+
+
+def _create_default_schedules(medication: Medication):
+    """Create sensible default MedicationSchedule records based on frequency."""
+    entries = _FREQUENCY_DEFAULTS.get(medication.frequency, [('08:00', 'Morning')])
+    for time_str, label in entries:
+        h, m = map(int, time_str.split(':'))
+        MedicationSchedule.objects.create(
+            medication=medication,
+            time_of_day=dt_time(h, m),
+            time_label=label,
+        )
 
 
 class MedicationScheduleSerializer(serializers.ModelSerializer):
@@ -189,40 +217,23 @@ class MedicationCreateUpdateSerializer(serializers.ModelSerializer):
         ]
     
     def create(self, validated_data):
-        """Create medication with schedules"""
-        schedules_data = validated_data.pop('schedules', [])
-        medication = Medication.objects.create(**validated_data)
-        
-        # Create schedules
-        for schedule_data in schedules_data:
-            MedicationSchedule.objects.create(
-                medication=medication,
-                **schedule_data
+        """Create medication. Auto-sets dose_times from frequency if not provided."""
+        from .schedule_utils import default_dose_times_for_frequency
+        validated_data.pop('schedules', [])   # unused
+        # Auto-populate dose_times so patient-preferred times are stored on the model
+        if not validated_data.get('dose_times'):
+            validated_data['dose_times'] = default_dose_times_for_frequency(
+                validated_data.get('frequency', 'ONCE_DAILY')
             )
-        
+        medication = Medication.objects.create(**validated_data)
         return medication
     
     def update(self, instance, validated_data):
-        """Update medication and optionally schedules"""
-        schedules_data = validated_data.pop('schedules', None)
-        
-        # Update medication fields
+        """Update medication fields. Schedule times derive from frequency — no MedicationSchedule rows touched."""
+        validated_data.pop('schedules', None)  # unused
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
-        
-        # Update schedules if provided
-        if schedules_data is not None:
-            # Delete old schedules
-            instance.schedules.all().delete()
-            
-            # Create new schedules
-            for schedule_data in schedules_data:
-                MedicationSchedule.objects.create(
-                    medication=instance,
-                    **schedule_data
-                )
-        
         return instance
 
 

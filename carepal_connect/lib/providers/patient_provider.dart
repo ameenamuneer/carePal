@@ -120,6 +120,16 @@ class PatientProvider extends ChangeNotifier {
     }
   }
 
+  /// Returns true if the currently active patient has a ClinicalRelationship
+  /// that grants the logged-in doctor medication edit rights.
+  bool canEditMedicationsForActivePatient(String userType) {
+    if (userType != 'DOCTOR') return false;
+    final link = _clinicalLinks
+        .where((l) => l.patient == _activePatientId)
+        .firstOrNull;
+    return link?.canEditMedications ?? false;
+  }
+
   /// Wipe all state — call this on logout or before a new session starts.
   void clear() {
     _clinicalLinks = [];

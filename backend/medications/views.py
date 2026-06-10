@@ -116,11 +116,7 @@ class MedicationViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         medication = serializer.save()
-        
-        # Generate next 7 days (async)
-        from .tasks import generate_adherence_records
-        generate_adherence_records.delay(medication.id, days=7)
-        
+        # No pre-generation — adherence records are created lazily when a date is first queried.
         logger.info(f"[MEDICATION] Created {medication.medication_name} (ID: {medication.id})")
         
         output_serializer = MedicationDetailSerializer(medication)
@@ -151,6 +147,48 @@ class MedicationViewSet(viewsets.ModelViewSet):
         if err:
             return err
         return super().destroy(request, *args, **kwargs)
+
+    @action(detail=False, methods=['post'])
+    def check_duplicate(self, request):
+        """
+        Lightweight duplicate check before creating a medication.
+        POST /api/v1/medications/medications/check_duplicate/
+        Body: {medication_name, dosage, frequency, patient}
+        Returns: {matches: [...], has_duplicate: bool}
+        """
+        name = request.data.get('medication_name', '').strip().lower()
+        patient_id = request.data.get('patient')
+        dosage = request.data.get('dosage', '').strip().lower()
+        frequency = request.data.get('frequency', '')
+
+        if not name or not patient_id:
+            return Response({'matches': [], 'has_duplicate': False})
+
+        # Find active meds for this patient with similar names
+        existing = Medication.objects.filter(
+            patient_id=patient_id,
+            status='ACTIVE',
+        )
+
+        matches = []
+        for med in existing:
+            med_name_lower = med.medication_name.lower()
+            # Direct substring match (catches "meftal" vs "meftal forte")
+            if name in med_name_lower or med_name_lower in name:
+                matches.append({
+                    'id': med.id,
+                    'medication_name': med.medication_name,
+                    'dosage': med.dosage,
+                    'frequency': med.frequency,
+                    'status': med.status,
+                    'same_dosage': med.dosage.lower() == dosage,
+                    'same_frequency': med.frequency == frequency,
+                })
+
+        return Response({
+            'matches': matches,
+            'has_duplicate': len(matches) > 0,
+        })
 
     @action(detail=False, methods=['post'])
     def import_prescription(self, request):
@@ -507,52 +545,92 @@ class MedicationAdherenceViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def today(self, request):
         """
-        Get today's complete medication schedule
+        Get today's schedule — dynamically calculated from active medications.
         GET /api/v1/medications/adherence/today/?patient_id=1
-        
-        Returns a complete schedule for today with all medications
+        Delegates to the generic `schedule` action with date=today.
         """
+        request.query_params._mutable = True  # allow patching for delegation
+        request.query_params.setdefault('date', str(timezone.now().date()))
+        request.query_params._mutable = False
+        return self.schedule(request)
+
+    @action(detail=False, methods=['get'])
+    def schedule(self, request):
+        """
+        Dynamically calculate the medication schedule for any date.
+        GET /api/v1/medications/adherence/schedule/?patient_id=1&date=2026-06-10
+
+        - date defaults to today
+        - For today or past dates: ensures MedicationAdherence rows exist (lazy creation)
+          and returns actual status (TAKEN / MISSED / SCHEDULED).
+        - For future dates: returns the calculated schedule with status='SCHEDULED'
+          but does NOT create adherence rows yet.
+        Past adherence rows are never modified — only new gaps are filled.
+        """
+        from .schedule_utils import get_schedule_for_date, ensure_adherence_records
+
         patient_id = request.query_params.get('patient_id')
-        
         if not patient_id and request.user.user_type == 'PATIENT':
             patient = PatientProfile.objects.filter(user=request.user).first()
             patient_id = patient.id if patient else None
-        
+
         if not patient_id:
-            return Response(
-                {'error': 'patient_id is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
+            return Response({'error': 'patient_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        date_str = request.query_params.get('date', str(timezone.now().date()))
+        try:
+            from datetime import date as date_type
+            target_date = date_type.fromisoformat(date_str)
+        except ValueError:
+            return Response({'error': 'Invalid date format. Use YYYY-MM-DD.'}, status=status.HTTP_400_BAD_REQUEST)
+
         today = timezone.now().date()
-        
-        # Get all adherence records for today
-        adherence_records = MedicationAdherence.objects.filter(
-            medication__patient_id=patient_id,
-            scheduled_date=today
-        ).select_related('medication', 'schedule').order_by('scheduled_time')
-        
-        # Build schedule data
-        schedule_data = []
-        for record in adherence_records:
-            schedule_data.append({
-                'adherence_id': record.id,
-                'medication_id': record.medication.id,
-                'medication_name': record.medication.medication_name,
-                'dosage': record.medication.dosage,
-                'form': record.medication.form,
-                'instructions': record.medication.instructions or '',
-                'scheduled_time': record.scheduled_time,
-                'time_label': record.schedule.time_label if record.schedule else '',
-                'with_food': record.schedule.with_food if record.schedule else False,
-                'special_instructions': record.schedule.special_instructions if record.schedule else '',
-                'is_critical': record.medication.is_critical,
-                'status': record.status,
-                'actual_datetime': record.actual_datetime,
-                'notes': record.notes or '',
-                'is_overdue': record.is_overdue
-            })
-        
+
+        if target_date <= today:
+            # Lazily ensure all adherence rows exist for this date, then return with real statuses
+            pairs = ensure_adherence_records(int(patient_id), target_date)
+            schedule_data = []
+            for item, record in pairs:
+                schedule_data.append({
+                    'adherence_id': record.id,
+                    'medication_id': item['medication_id'],
+                    'medication_name': item['medication_name'],
+                    'dosage': item['dosage'],
+                    'form': item['form'],
+                    'instructions': item['instructions'],
+                    'scheduled_time': item['scheduled_time'],
+                    'time_label': item['time_label'],
+                    'with_food': False,
+                    'special_instructions': '',
+                    'is_critical': item['is_critical'],
+                    'status': record.status,
+                    'actual_datetime': record.actual_datetime,
+                    'notes': record.notes or '',
+                    'is_overdue': record.is_overdue,
+                })
+        else:
+            # Future date — pure calculation, no DB writes
+            items = get_schedule_for_date(int(patient_id), target_date)
+            schedule_data = []
+            for item in items:
+                schedule_data.append({
+                    'adherence_id': None,
+                    'medication_id': item['medication_id'],
+                    'medication_name': item['medication_name'],
+                    'dosage': item['dosage'],
+                    'form': item['form'],
+                    'instructions': item['instructions'],
+                    'scheduled_time': item['scheduled_time'],
+                    'time_label': item['time_label'],
+                    'with_food': False,
+                    'special_instructions': '',
+                    'is_critical': item['is_critical'],
+                    'status': 'SCHEDULED',
+                    'actual_datetime': None,
+                    'notes': '',
+                    'is_overdue': False,
+                })
+
         serializer = TodaysMedicationScheduleSerializer(schedule_data, many=True)
         return Response(serializer.data)
     

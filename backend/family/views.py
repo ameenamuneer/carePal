@@ -41,10 +41,8 @@ class FamilyMemberViewSet(viewsets.ModelViewSet):
             # Patients can see family members linked to them
             return FamilyMember.objects.filter(patient__user=user)
         elif user.user_type == 'FAMILY':
-            # Family members see themselves and other family members of their patients
-            my_memberships = FamilyMember.objects.filter(user=user)
-            my_patients = my_memberships.values_list('patient_id', flat=True)
-            return FamilyMember.objects.filter(patient_id__in=my_patients)
+            # Family members see only their own memberships
+            return FamilyMember.objects.filter(user=user)
         else:
             # Doctors/Admin see all
             return FamilyMember.objects.all()

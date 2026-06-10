@@ -5,10 +5,12 @@ import '../core/app_colors.dart';
 import '../providers/auth_provider.dart';
 import '../providers/patient_provider.dart';
 import '../providers/activity_log_provider.dart';
+import '../providers/medication_provider.dart';
 import 'dashboard_screen.dart';
 import 'activity_log_screen.dart';
 import 'patients_screen.dart';
 import 'link_patient_screen.dart';
+import 'medications/medications_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -23,6 +25,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final List<Widget> _screens = const [
     DashboardScreen(),
     ActivityLogScreen(),
+    MedicationsScreen(),
     PatientsScreen(),
   ];
 
@@ -100,6 +103,7 @@ class _HomeScreenState extends State<HomeScreen> {
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _currentIndex,
         onTap: (i) => setState(() => _currentIndex = i),
+        type: BottomNavigationBarType.fixed,
         items: const [
           BottomNavigationBarItem(
             icon: Icon(Icons.home_outlined),
@@ -110,6 +114,11 @@ class _HomeScreenState extends State<HomeScreen> {
             icon: Icon(Icons.history_outlined),
             activeIcon: Icon(Icons.history),
             label: 'Activity Log',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.medication_outlined),
+            activeIcon: Icon(Icons.medication),
+            label: 'Medications',
           ),
           BottomNavigationBarItem(
             icon: Icon(Icons.people_outline),
@@ -201,9 +210,8 @@ class _PatientSwitcherBar extends StatelessWidget {
           return GestureDetector(
             onTap: () {
               patientProvider.setActivePatient(p.id, p.name);
-              context
-                  .read<ActivityLogProvider>()
-                  .setPatientAndReload(p.id);
+              context.read<ActivityLogProvider>().setPatientAndReload(p.id);
+              context.read<MedicationProvider>().setPatientAndReload(p.id);
             },
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 200),
