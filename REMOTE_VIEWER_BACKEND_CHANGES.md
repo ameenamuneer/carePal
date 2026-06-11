@@ -1,7 +1,7 @@
 # CarePal Backend — Remote Viewer & Live AI Enhancement Spec
 
-**Version:** 1.1  
-**Date:** 2026-06-10  
+**Version:** 1.3  
+**Date:** 2026-06-11  
 **Scope:** Django 4.2 backend at `backend/`  
 **Tech stack:** Django 4.2, DRF, Django Channels (WebSocket), Celery + Redis, PostgreSQL, Gemini Live API (gemini-2.5-flash-native-audio-preview)
 
@@ -20,6 +20,8 @@
 9. [Messaging System](#9-messaging-system)
 10. [Push Notification Infrastructure](#10-push-notification-infrastructure)
 11. [Family Home Screen — AI-Generated Summary Cards](#11-family-home-screen--ai-generated-summary-cards)
+12. [Medication Schedule Redesign — Dynamic dose_times Architecture](#12-medication-schedule-redesign--dynamic-dose_times-architecture)
+13. [Adherence Calendar API](#13-adherence-calendar-api)
 
 ---
 
@@ -3154,6 +3156,270 @@ python-dateutil>=2.8  (already likely present)
 GOOGLE_API_KEY=...                     # Already present
 FIREBASE_CREDENTIALS_PATH=/path/to/firebase-adminsdk.json
 ```
+
+---
+
+## 12. Medication Schedule Redesign — Dynamic `dose_times` Architecture
+
+### Problem with Previous Design
+
+The previous architecture used a `MedicationSchedule` DB table (one row per dose per medication) to store timing. This caused several issues:
+
+- Creating a medication required a separate schedule creation step; if skipped, the app showed no schedule
+- Changing a medication's timing required deleting and recreating `MedicationSchedule` rows
+- The Monitor Agent and Live AI had to navigate a separate model join to get timing data
+- Pre-generating future `MedicationAdherence` rows (7 days ahead) created stale records that didn't reflect timing changes
+
+---
+
+### Architecture Decision
+
+Timing is now stored as a `dose_times` JSONField **directly on the `Medication` model**. Schedules are computed on demand — never pre-generated for future dates.
+
+**Key principles:**
+- `Medication.dose_times` is the single source of truth for all timing
+- `get_schedule_for_date()` is a pure Python function — no DB writes, reads `dose_times`
+- `ensure_adherence_records()` is idempotent — creates adherence rows lazily the first time a date is queried (today or past)
+- Future dates: calculated on the fly, no DB rows written
+- Changing `dose_times` takes effect immediately for all future queries — no migration of pre-generated records needed
+
+---
+
+### 12.1 Model Change — `dose_times` on `Medication`
+
+**File:** `backend/medications/models.py`
+
+```python
+dose_times = models.JSONField(
+    default=list,
+    blank=True,
+    help_text=(
+        'List of {time: "HH:MM", label: "Morning"} dicts. '
+        'Auto-populated from frequency on create. '
+        'Editable by patient/doctor or updated by Monitor Agent on patient preference.'
+    )
+)
+```
+
+Migration: `0005_add_dose_times_to_medication`
+
+The `MedicationSchedule` model class is **retained in `models.py`** (not deleted) to avoid a complex migration involving its FK on `MedicationAdherence.schedule`. All application code has been cleaned of any reference to it.
+
+---
+
+### 12.2 New File — `medications/schedule_utils.py`
+
+Pure Python utilities for schedule calculation. No Django model imports at the top level — safe to use anywhere.
+
+```python
+FREQUENCY_TIMES = {
+    'ONCE_DAILY':        [('08:00', 'Morning')],
+    'TWICE_DAILY':       [('08:00', 'Morning'), ('20:00', 'Evening')],
+    'THREE_TIMES_DAILY': [('08:00', 'Morning'), ('13:00', 'Afternoon'), ('20:00', 'Evening')],
+    'FOUR_TIMES_DAILY':  [('07:00', 'Morning'), ('12:00', 'Noon'), ('17:00', 'Afternoon'), ('22:00', 'Night')],
+    'EVERY_6_HOURS':     [('06:00', '6 AM'), ('12:00', 'Noon'), ('18:00', '6 PM'), ('00:00', 'Midnight')],
+    'EVERY_8_HOURS':     [('08:00', 'Morning'), ('16:00', 'Afternoon'), ('00:00', 'Midnight')],
+    'EVERY_12_HOURS':    [('08:00', 'Morning'), ('20:00', 'Evening')],
+    'WEEKLY':            [('08:00', 'Morning')],
+    'MONTHLY':           [('08:00', 'Morning')],
+    'AS_NEEDED':         [],
+}
+
+def get_times_for_medication(medication) -> list[tuple[time, str]]:
+    """Read dose_times from medication; fall back to frequency default."""
+
+def get_schedule_for_date(patient_id: int, date: date) -> list[dict]:
+    """Pure read — returns list of schedule item dicts. No DB writes."""
+
+def ensure_adherence_records(patient_id: int, date: date) -> list[tuple[dict, MedicationAdherence]]:
+    """Idempotent. Creates MedicationAdherence rows if missing. Returns (item, record) pairs."""
+
+def default_dose_times_for_frequency(frequency: str) -> list[dict]:
+    """Returns JSON-ready [{"time": "HH:MM", "label": "Morning"}] for auto-populating dose_times."""
+```
+
+---
+
+### 12.3 Updated API Endpoints
+
+#### `GET /api/v1/medications/adherence/schedule/?patient_id=X&date=YYYY-MM-DD`
+
+Replaces the old `today` endpoint. Works for any date:
+
+- **Today or past:** calls `ensure_adherence_records`, returns real statuses (`TAKEN / MISSED / SCHEDULED`)
+- **Future date:** calls `get_schedule_for_date`, returns `status='SCHEDULED'`, no DB writes
+
+Response shape per item:
+```json
+{
+  "adherence_id": 42,
+  "medication_id": 5,
+  "medication_name": "Meftal Forte",
+  "dosage": "500mg",
+  "scheduled_time": "08:00:00",
+  "time_label": "Morning",
+  "status": "TAKEN",
+  "actual_datetime": "2026-06-10T08:14:00Z",
+  "notes": "",
+  "is_overdue": false
+}
+```
+
+#### `POST /api/v1/medications/medications/check_duplicate/`
+
+Pre-flight duplicate check before adding a new medication.
+
+Request body:
+```json
+{ "medication_name": "Meftal Forte", "dosage": "500mg", "frequency": "TWICE_DAILY", "patient": 1 }
+```
+
+Response:
+```json
+{ "matches": [ { "id": 1, "medication_name": "Meftal Forte", "dosage": "500mg", "status": "ACTIVE" } ] }
+```
+
+---
+
+### 12.4 Updated `MedicationCreateUpdateSerializer`
+
+On `create()`, `dose_times` is auto-populated from `default_dose_times_for_frequency(frequency)` if not supplied by the client. No separate schedule creation step required.
+
+---
+
+### 12.5 Updated Monitor Agent — `update_medication_times` Tool
+
+The `MedicationMonitorAgent` now has **4 tools** (previously 3):
+
+| Tool | When to use |
+|---|---|
+| `update_adherence` | Patient confirmed taking or skipping a specific dose today |
+| `update_medication_times` | Patient expresses a **permanent** timing preference (e.g. "I want to take it at 7am from now on") |
+| `request_clarification` | Log is genuinely ambiguous |
+| `do_nothing` | Nothing actionable |
+
+**`update_medication_times` tool definition:**
+
+```python
+{
+    "name": "update_medication_times",
+    "description": "Update the preferred dosing times for a medication. Use ONLY when the patient has clearly expressed a PERMANENT timing preference. Do NOT use for one-off late doses.",
+    "parameters": {
+        "medication_name": "string — name from active medications list",
+        "new_times": "array of {time: HH:MM, label: string} — must match medication frequency",
+        "reason": "string — brief note"
+    }
+}
+```
+
+**What it does:** Updates `medication.dose_times` in place. No pre-generated records to regenerate — the next query of any future date will compute fresh times from the updated `dose_times`.
+
+---
+
+### 12.6 Live AI System Prompt Addition
+
+**File:** `backend/agent/live_consumer.py`
+
+Added "Medication Timing Preferences" section to system prompt:
+
+```
+Medication Timing Preferences:
+- If the patient expresses a desire to permanently change when they take a medication
+  (e.g. "I'd prefer to take my evening pill at 9pm instead of 8pm"), log it as:
+  log_patient_activity(activity_type='MEDICATION', description="Patient wants to permanently
+  change [medication name] dose time to [time]. Reason: [reason if given].")
+- After logging, say: "I've noted that — your schedule will be updated."
+- Do NOT log one-off lateness as a timing preference. Only log permanent preference changes.
+```
+
+---
+
+### 12.7 Cleanup — `MedicationSchedule` References Removed
+
+All application code references to `MedicationSchedule` have been removed from:
+
+| File | Change |
+|---|---|
+| `medications/serializers.py` | Removed `MedicationScheduleSerializer`, dead `_create_default_schedules` helper, `_FREQUENCY_DEFAULTS` dict |
+| `medications/views.py` | Removed `MedicationScheduleViewSet`; `schedule` action uses `schedule_utils` |
+| `medications/urls.py` | Removed `schedules` router registration |
+| `medications/admin.py` | Removed `MedicationScheduleInline` and `MedicationScheduleAdmin` |
+| `medications/tasks.py` | Uses `get_times_for_medication()` instead of `medication.schedules.filter()` |
+| `agent/live_consumer.py` | Uses `get_times_for_medication()` for medication context |
+| `agent/medication_monitor_agent.py` | Uses `get_times_for_medication()`; removed `MedicationSchedule` import |
+| `agent/function_executor.py` | `_get_medication_schedule()` rewritten with `ensure_adherence_records` / `get_schedule_for_date` |
+| `agent/enhanced_function_executor.py` | All schedule references rewritten with `schedule_utils` |
+| `alerts/tasks.py` | Fixed `adherence.schedule.patient` → `adherence.medication.patient` |
+| `management/commands/populate_medications.py` | Uses `default_dose_times_for_frequency()` |
+| `populate_test_data.py` | Uses `default_dose_times_for_frequency()` |
+| `quick_test_data.py` | Uses `default_dose_times_for_frequency()` |
+| `verify_enhanced_agent.py` | Uses `default_dose_times_for_frequency()` |
+| `agent/tests/test_med_tools.py` | Uses `default_dose_times_for_frequency()` |
+
+The `MedicationSchedule` DB table and model class are intentionally preserved to avoid a migration that would need to handle the nullable `schedule` FK on `MedicationAdherence`.
+
+---
+
+### 12.8 Connect App (Flutter) Changes
+
+| File | Change |
+|---|---|
+| `carepal_connect/lib/models/medication.dart` | Added `_parseScheduledTime()` to correctly parse `"HH:MM:SS"` time-only strings (previously fell back to `DateTime.now()`) |
+| `carepal_connect/lib/services/medication_service.dart` | `getTodaysSchedule()` hits `/adherence/schedule/`; added `deleteMedication()`, `checkDuplicate()` |
+| `carepal_connect/lib/providers/medication_provider.dart` | Added `deleteMedication()`, optional `date` param on `loadTodaysSchedule()` |
+| `carepal_connect/lib/screens/medications/medications_screen.dart` | Delete button in detail sheet; duplicate warning dialog on add |
+| `carepal_connect/lib/screens/medications/add_medication_screen.dart` | Pre-flight duplicate check before save; `_showDuplicateWarning()` dialog with "Cancel" / "Add Anyway" options |
+
+---
+
+## 13. Adherence Calendar API
+
+### Problem
+
+The Connect app's "Adherence History" section was showing future dates (pre-generated `SCHEDULED` records) as if they were history. The list was not useful for understanding past adherence patterns.
+
+---
+
+### 13.1 New Endpoint — `calendar_summary`
+
+**File:** `backend/medications/views.py` — added to `MedicationAdherenceViewSet`
+
+```
+GET /api/v1/medications/adherence/calendar_summary/?patient_id=1&months_back=2
+```
+
+Returns a flat dict keyed by `YYYY-MM-DD` for every day that has adherence records in the past N months:
+
+```json
+{
+  "2026-06-10": { "total": 4, "taken": 3, "missed": 1, "skipped": 0, "scheduled": 0 },
+  "2026-06-09": { "total": 4, "taken": 4, "missed": 0, "skipped": 0, "scheduled": 0 }
+}
+```
+
+Implementation uses a single aggregated DB query (`.values('scheduled_date').annotate(...)`). Only covers today and past dates — future dates are handled client-side.
+
+---
+
+### 13.2 Connect App Calendar UI
+
+| File | Change |
+|---|---|
+| `carepal_connect/lib/services/medication_service.dart` | Added `getCalendarSummary()` |
+| `carepal_connect/lib/providers/medication_provider.dart` | Added `calendarData`, `loadCalendarSummary()`, `loadDaySchedule(day)` with per-day cache; `loadAll()` calls `loadCalendarSummary()` instead of `loadHistory()` |
+| `carepal_connect/lib/screens/medications/medications_screen.dart` | Replaced history list with `TableCalendar` widget |
+
+**Calendar colouring logic (client-side):**
+
+| Day type | Colour |
+|---|---|
+| Past day ≥ 80% taken | Green background tint + green dot |
+| Past day 40–79% taken | Yellow background tint + yellow dot |
+| Past day < 40% taken | Red background tint + red dot |
+| Future day | Blue dot only (no background tint) |
+| No data | No marker |
+
+**Day tap behaviour:** Opens a bottom sheet (`_DayScheduleSheet`) that lazily fetches and caches the schedule for that specific date via `loadDaySchedule(day)` → `GET /api/v1/medications/adherence/schedule/?date=YYYY-MM-DD`. Shows each medication's status with Mark/Skip actions for today and past dates. Future dates show as read-only scheduled items.
 
 ---
 
