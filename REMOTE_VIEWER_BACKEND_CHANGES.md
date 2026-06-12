@@ -922,9 +922,21 @@ docker compose exec backend python manage.py migrate
 
 `log_patient_activity` with `activity_type=MEAL` is called, creating a `PatientActivityLog` entry. There is no dedicated `NutritionLog` model, no calorie tracking, no threshold alerts.
 
+### Architecture — Learned from Section 2
+
+This section reuses the full pipeline built for medications rather than the simpler (but flawed) synchronous approach in the original plan:
+
+| Original plan | Revised approach | Reason |
+|---|---|---|
+| Create `NutritionLog` synchronously inside `_save_activity_log` | Signal → Celery → `NutritionMonitorAgent` | Keeps WebSocket consumer non-blocking; enables async AI estimation |
+| Live AI estimates kcal and passes `meal_items` in tool call | Live AI logs description faithfully; agent does structured extraction | Same split as medications: Live AI captures intent, agent interprets it |
+| Nightly Celery beat task for threshold check | Reactive `post_save` signal on `NutritionLog` | Immediate feedback; no beat schedule needed; mirrors medication alert pattern |
+
+The signal handler, `PendingQuestion` model, and Celery worker infrastructure are **already in place** from Section 2 — no new infrastructure required.
+
 ---
 
-### 3.1 PatientProfile Field Additions
+### 3.1 `PatientProfile` Field Additions
 
 **File:** `backend/patients/models.py` — add to `PatientProfile`:
 
@@ -935,17 +947,17 @@ daily_calorie_target = models.IntegerField(
 )
 nutrition_alert_threshold_percent = models.IntegerField(
     default=70,
-    help_text="Alert when daily intake falls below this % of target (e.g. 70 = alert if <70% of target reached)."
+    help_text="Alert if daily intake falls below this % of target (e.g. 70 = alert if <70% reached)."
 )
 ```
 
-Run `python manage.py makemigrations patients`.
+Run: `python manage.py makemigrations patients --name="add_nutrition_fields"`
 
 ---
 
 ### 3.2 New Model — `NutritionLog`
 
-**File:** `backend/agent/models.py` (alongside `PatientActivityLog`)
+**File:** `backend/agent/models.py` (alongside `PatientActivityLog` and `PendingQuestion`)
 
 ```python
 class NutritionLog(models.Model):
@@ -956,174 +968,577 @@ class NutritionLog(models.Model):
         ('SNACK', 'Snack'),
         ('OTHER', 'Other'),
     ]
-    SOURCE_CHOICES = [
-        ('AI_INFERRED', 'AI Inferred'),
-        ('MANUAL', 'Manual Entry'),
-    ]
 
-    patient = models.ForeignKey(
-        PatientProfile, on_delete=models.CASCADE, related_name='nutrition_logs'
+    patient     = models.ForeignKey(
+        'patients.PatientProfile', on_delete=models.CASCADE, related_name='nutrition_logs'
     )
-    logged_at = models.DateTimeField(auto_now_add=True)
-    meal_time = models.DateTimeField(
-        help_text="When the meal was consumed (may differ from logged_at)"
+    meal_time   = models.DateTimeField(
+        help_text="When the meal was consumed (may differ from when it was logged)"
     )
-    meal_type = models.CharField(max_length=15, choices=MEAL_TYPE_CHOICES, default='OTHER')
-    description = models.TextField()
+    meal_type   = models.CharField(max_length=15, choices=MEAL_TYPE_CHOICES, default='OTHER')
+    description = models.TextField(help_text="What the patient said they ate")
     estimated_kcal = models.IntegerField(
         null=True, blank=True,
-        help_text="AI-estimated or manually entered kilocalories"
+        help_text="AI-estimated kilocalories for this meal"
     )
     items = models.JSONField(
         default=list, blank=True,
-        help_text="List of food items: [{'name': 'rice', 'qty': '1 cup', 'kcal': 200}]"
+        help_text="Parsed food items: [{'name': 'rice', 'qty': '1 cup', 'kcal': 200}]"
     )
-    below_threshold = models.BooleanField(default=False)
-    source = models.CharField(max_length=15, choices=SOURCE_CHOICES, default='AI_INFERRED')
-    activity_log = models.OneToOneField(
-        PatientActivityLog,
+    appetite    = models.CharField(
+        max_length=10, blank=True,
+        help_text="GOOD | POOR | NORMAL — patient's reported appetite"
+    )
+    below_threshold = models.BooleanField(
+        default=False,
+        help_text="True if this meal pushed the daily total below the patient's threshold"
+    )
+    # Audit trail — mirrors MedicationAdherence.source_activity_log
+    source_activity_log = models.OneToOneField(
+        'agent.PatientActivityLog',
         on_delete=models.SET_NULL,
         null=True, blank=True,
-        related_name='nutrition_log'
+        related_name='nutrition_log',
+        help_text="The MEAL activity log entry that triggered this record"
     )
+    logged_at   = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         db_table = 'nutrition_logs'
-        ordering = ['-meal_time']
-        indexes = [
-            models.Index(fields=['patient', '-meal_time']),
-        ]
+        ordering  = ['-meal_time']
+        indexes   = [models.Index(fields=['patient', '-meal_time'])]
 
     def __str__(self):
         return f"{self.patient.user.get_full_name()} | {self.meal_type} | {self.meal_time:%Y-%m-%d %H:%M}"
 ```
 
----
-
-### 3.3 Auto-Create NutritionLog from `_save_activity_log`
-
-**File:** `backend/agent/live_consumer.py`
-
-At the end of `_save_activity_log()`, after `log_entry.save()`, add:
-
-```python
-# Auto-create NutritionLog for MEAL entries
-if params.get('activity_type') == 'MEAL':
-    details = params.get('details', {}) or {}
-    NutritionLog.objects.create(
-        patient=patient,
-        meal_time=observed_at,
-        meal_type=details.get('meal_type', 'OTHER').upper(),
-        description=params.get('description', ''),
-        estimated_kcal=details.get('estimated_kcal'),
-        items=details.get('meal_items', []),
-        source='AI_INFERRED',
-        activity_log=log_entry,
-    )
-```
-
-Import `NutritionLog` at the top of the method's import block.
+Run: `python manage.py makemigrations agent --name="add_nutrition_log"`
 
 ---
 
-### 3.4 Updated Tool Schema
+### 3.3 Live AI — System Prompt Update Only
 
 **File:** `backend/agent/live_consumer.py`
 
-In the `log_patient_activity` `FunctionDeclaration`, update the `details` field description:
+The Live AI's only job is to **log what the patient says about food faithfully** using the existing `log_patient_activity` tool. It does **not** estimate calories — that is the agent's job.
+
+Update the `details` description in the `log_patient_activity` `FunctionDeclaration` for MEAL:
 
 ```
 MEAL → {
   meal_type: "BREAKFAST|LUNCH|DINNER|SNACK|OTHER",
-  estimated_kcal: <integer — best estimate total calories>,
-  meal_items: [{"name": "...", "qty": "..."}],
-  appetite: "GOOD|POOR|NORMAL"
+  appetite:  "GOOD|POOR|NORMAL"
+  // Do NOT include estimated_kcal or meal_items — the monitor agent handles that.
+  // Capture the full description of what the patient says they ate in the top-level
+  // 'description' field as faithfully as possible.
 }
+```
+
+Add to the system prompt **Rules** section:
+
+```
+Meal Logging:
+- When the patient mentions eating anything — a meal, snack, drink with calories, or
+  anything food-related — call log_patient_activity with activity_type='MEAL'.
+- Capture exactly what they said in the description field: quantities, food names,
+  cooking method, anything specific. More detail is always better.
+- Do NOT attempt to count calories yourself. Just log faithfully.
+- Ask about appetite naturally: "How was your appetite?" — log the answer in details.appetite.
+- Do not ask about meals more than once per meal window (morning/afternoon/evening).
 ```
 
 ---
 
-### 3.5 Celery Task — `check_daily_nutrition_threshold`
+### 3.4 Signal — Trigger Celery Task on MEAL Log
 
-**File:** `backend/agent/tasks.py` (create or add to existing)
+**File:** `backend/agent/signals.py` — add one branch to the existing handler:
 
 ```python
-from celery import shared_task
+@receiver(post_save, sender=PatientActivityLog)
+def on_activity_log_saved(sender, instance, created, **kwargs):
+    if not created:
+        return
+    if instance.activity_type == 'MEDICATION':
+        from .tasks import process_medication_log
+        process_medication_log.delay(instance.id)
+    elif instance.activity_type == 'MEAL':          # ← add this
+        from .tasks import process_nutrition_log
+        process_nutrition_log.delay(instance.id)
+```
+
+No new signal infrastructure — the `post_save` receiver is already registered in `agent/apps.py`.
+
+---
+
+### 3.5 Celery Task — `process_nutrition_log`
+
+**File:** `backend/agent/tasks.py` — add alongside `process_medication_log`:
+
+```python
+@shared_task(bind=True, max_retries=3, default_retry_delay=30)
+def process_nutrition_log(self, activity_log_id: int):
+    """
+    Triggered whenever a MEAL activity log is saved.
+    Calls NutritionMonitorAgent to parse the description, estimate kcal,
+    create a NutritionLog, and check the daily threshold.
+    """
+    try:
+        from .models import PatientActivityLog
+        log = PatientActivityLog.objects.select_related('patient__user').get(id=activity_log_id)
+        from .nutrition_monitor_agent import NutritionMonitorAgent
+        NutritionMonitorAgent().process(log)
+    except PatientActivityLog.DoesNotExist:
+        logger.warning(f"process_nutrition_log: log {activity_log_id} not found")
+    except Exception as exc:
+        logger.error(f"process_nutrition_log failed: {exc}")
+        raise self.retry(exc=exc)
+```
+
+---
+
+### 3.6 Pure Utility Module — `nutrition_utils.py`
+
+**File:** `backend/agent/nutrition_utils.py` (new — mirrors `medications/schedule_utils.py`)
+
+No ORM side effects. Used by both the agent and the threshold signal.
+
+```python
+from django.db.models import Sum
+
+
+def get_daily_kcal_total(patient_id: int, date) -> int:
+    """Sum of estimated_kcal for all NutritionLog entries on a given date."""
+    from .models import NutritionLog
+    result = (
+        NutritionLog.objects
+        .filter(patient_id=patient_id, meal_time__date=date, estimated_kcal__isnull=False)
+        .aggregate(total=Sum('estimated_kcal'))['total']
+    )
+    return result or 0
+
+
+def get_threshold_kcal(patient) -> int | None:
+    """
+    Returns the minimum acceptable kcal for the day, or None if no target is set.
+    """
+    if not patient.daily_calorie_target:
+        return None
+    return int(patient.daily_calorie_target * patient.nutrition_alert_threshold_percent / 100)
+
+
+def is_below_threshold(patient, date) -> bool:
+    threshold = get_threshold_kcal(patient)
+    if threshold is None:
+        return False
+    return get_daily_kcal_total(patient.id, date) < threshold
+
+
+def get_consecutive_low_days(patient, up_to_date, window: int = 3) -> int:
+    """
+    Returns the number of consecutive days up to and including up_to_date
+    where the daily total was below threshold.
+    """
+    from datetime import timedelta
+    count = 0
+    for i in range(window):
+        day = up_to_date - timedelta(days=i)
+        if is_below_threshold(patient, day):
+            count += 1
+        else:
+            break
+    return count
+```
+
+---
+
+### 3.7 `NutritionMonitorAgent`
+
+**File:** `backend/agent/nutrition_monitor_agent.py` (new — mirrors `medication_monitor_agent.py`)
+
+Same structure: Gemini function-calling, `ANY` mode, `temperature=0.1`, one tool called per invocation.
+
+#### System prompt
+
+```python
+SYSTEM_PROMPT = """
+You are the CarePal Nutrition Monitor Agent. You receive a meal-related activity log
+from a patient's conversation with the CarePal Live AI assistant.
+
+Your job is to call exactly ONE tool:
+
+1. create_nutrition_log — parse the description into a structured meal record with
+   estimated calories and food items.
+2. request_clarification — the description is too vague to estimate (e.g. "had some food").
+3. do_nothing — the log is not actually a meal event (e.g. patient discussing food in general
+   without having eaten, or log already processed).
+
+## Rules
+- Use common nutritional knowledge to estimate kcal. Err on the side of a reasonable
+  average portion if quantities are not specified.
+- If multiple foods are mentioned, break them into items with individual kcal estimates
+  that sum to the total estimated_kcal.
+- Confidence < 0.6 → use request_clarification instead of create_nutrition_log.
+- NEVER create duplicate logs. Check the context: if a NutritionLog already exists for
+  this activity_log_id, call do_nothing.
+- You must call exactly one tool. Do not respond with plain text.
+"""
+```
+
+#### Tools
+
+```python
+TOOLS = [
+    {
+        "name": "create_nutrition_log",
+        "description": (
+            "Create a structured NutritionLog from the patient's meal description. "
+            "Parse the description into meal type, food items with kcal estimates, "
+            "total estimated_kcal, and appetite. "
+            "Do NOT call this if a NutritionLog already exists for this activity log."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "meal_type": {
+                    "type": "string",
+                    "enum": ["BREAKFAST", "LUNCH", "DINNER", "SNACK", "OTHER"],
+                },
+                "estimated_kcal": {
+                    "type": "integer",
+                    "description": "Total estimated kilocalories for the meal."
+                },
+                "items": {
+                    "type": "array",
+                    "description": "Individual food items.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "qty":  {"type": "string", "description": "e.g. '1 cup', '2 pieces'"},
+                            "kcal": {"type": "integer"},
+                        },
+                        "required": ["name", "kcal"]
+                    }
+                },
+                "appetite": {
+                    "type": "string",
+                    "enum": ["GOOD", "NORMAL", "POOR"],
+                    "description": "Patient's reported appetite, if mentioned."
+                },
+                "confidence": {
+                    "type": "number",
+                    "description": "0.0–1.0. Below 0.6 use request_clarification instead."
+                }
+            },
+            "required": ["meal_type", "estimated_kcal", "confidence"]
+        }
+    },
+    {
+        "name": "request_clarification",
+        "description": (
+            "Queue a follow-up question via PendingQuestion. "
+            "Use when the description is too vague to estimate calories "
+            "(e.g. 'had some food', 'ate a bit')."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string"},
+                "context":  {"type": "string"},
+                "priority": {"type": "integer", "description": "1 (urgent) to 10 (low). Default 5."}
+            },
+            "required": ["question", "context"]
+        }
+    },
+    {
+        "name": "do_nothing",
+        "description": "Take no action.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {"type": "string"}
+            },
+            "required": ["reason"]
+        }
+    }
+]
+```
+
+#### Agent class
+
+```python
+import logging
+from datetime import date
+from django.conf import settings
 from django.utils import timezone
-from datetime import timedelta
 
-@shared_task
-def check_daily_nutrition_threshold():
-    """
-    Runs at 21:00 daily (schedule in celery beat).
-    For each patient with a daily_calorie_target, sum today's NutritionLog kcal.
-    If below threshold for N consecutive days, create an Alert.
-    """
-    from patients.models import PatientProfile
-    from agent.models import NutritionLog
-    from alerts.models import Alert, AlertType
+logger = logging.getLogger(__name__)
 
-    today = timezone.now().date()
-    CONSECUTIVE_DAYS_THRESHOLD = 2
 
-    for patient in PatientProfile.objects.filter(
-        daily_calorie_target__isnull=False, is_active=True
-    ):
-        target = patient.daily_calorie_target
-        threshold_kcal = int(target * patient.nutrition_alert_threshold_percent / 100)
+class NutritionMonitorAgent:
+
+    def __init__(self):
+        from google import genai
+        self.client = genai.Client(api_key=self._get_api_key())
+
+    def _get_api_key(self):
+        import os
+        return (
+            os.environ.get('GOOGLE_API_KEY')
+            or getattr(settings, 'GOOGLE_API_KEY', None)
+            or getattr(settings, 'GEMINI_API_KEY', None)
+            or os.environ.get('GEMINI_API_KEY', '')
+        )
+
+    def process(self, log) -> None:
+        from google import genai
+        from google.genai import types as gtypes
+
+        # Duplicate guard — if a NutritionLog already exists for this log, skip
+        from .models import NutritionLog
+        if NutritionLog.objects.filter(source_activity_log=log).exists():
+            logger.info(f"[NutAgent] NutritionLog already exists for log {log.id}, skipping")
+            return
+
+        context = self._build_context(log)
+        function_declarations = self._build_function_declarations(gtypes)
+
+        try:
+            response = self.client.models.generate_content(
+                model='gemini-2.0-flash',
+                contents=context,
+                config=gtypes.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    tools=[gtypes.Tool(function_declarations=function_declarations)],
+                    tool_config=gtypes.ToolConfig(
+                        function_calling_config=gtypes.FunctionCallingConfig(mode='ANY')
+                    ),
+                    temperature=0.1,
+                ),
+            )
+            for part in response.candidates[0].content.parts:
+                if part.function_call:
+                    self._dispatch(part.function_call, log)
+                    break
+            else:
+                logger.warning(f"[NutAgent] No function call in response for log {log.id}")
+        except Exception as e:
+            logger.error(f"[NutAgent] Gemini call failed for log {log.id}: {e}")
+            raise
+
+    def _build_function_declarations(self, gtypes):
+        declarations = []
+        for t in TOOLS:
+            props = {}
+            for k, v in t['parameters']['properties'].items():
+                if v.get('type') == 'array':
+                    props[k] = gtypes.Schema(
+                        type='ARRAY',
+                        description=v.get('description', ''),
+                        items=gtypes.Schema(
+                            type='OBJECT',
+                            properties={
+                                pk: gtypes.Schema(type=pv.get('type', 'STRING').upper(),
+                                                  description=pv.get('description', ''))
+                                for pk, pv in v['items']['properties'].items()
+                            },
+                            required=v['items'].get('required', []),
+                        )
+                    )
+                else:
+                    props[k] = gtypes.Schema(
+                        type=v.get('type', 'STRING').upper(),
+                        description=v.get('description', ''),
+                        enum=v.get('enum'),
+                    )
+            declarations.append(gtypes.FunctionDeclaration(
+                name=t['name'],
+                description=t['description'],
+                parameters=gtypes.Schema(
+                    type='OBJECT',
+                    properties=props,
+                    required=t['parameters'].get('required', []),
+                )
+            ))
+        return declarations
+
+    def _dispatch(self, fc, log) -> None:
+        args = dict(fc.args)
+        logger.info(f"[NutAgent] Tool: {fc.name} | args: {args} | log: {log.id}")
+
+        if fc.name == 'create_nutrition_log':
+            self._create_nutrition_log(log=log, **{
+                'meal_type':      args.get('meal_type', 'OTHER'),
+                'estimated_kcal': int(args.get('estimated_kcal', 0)),
+                'items':          list(args.get('items', [])),
+                'appetite':       args.get('appetite', ''),
+                'confidence':     float(args.get('confidence', 1.0)),
+            })
+        elif fc.name == 'request_clarification':
+            self._queue_clarification(
+                log=log,
+                question=args['question'],
+                context=args.get('context', ''),
+                priority=int(args.get('priority', 5)),
+            )
+        elif fc.name == 'do_nothing':
+            logger.info(f"[NutAgent] do_nothing for log {log.id}: {args.get('reason', '')}")
+
+    def _create_nutrition_log(
+        self, log, meal_type, estimated_kcal, items, appetite, confidence
+    ) -> None:
+        from .models import NutritionLog
+        from .nutrition_utils import get_threshold_kcal, get_daily_kcal_total, get_consecutive_low_days
+
+        if confidence < 0.6:
+            logger.warning(f"[NutAgent] Skipping — confidence {confidence} below 0.6 for log {log.id}")
+            return
+
+        patient = log.patient
+        today = date.today()
+
+        nutrition_log = NutritionLog.objects.create(
+            patient=patient,
+            meal_time=log.observed_at,
+            meal_type=meal_type,
+            description=log.description,
+            estimated_kcal=estimated_kcal,
+            items=items,
+            appetite=appetite,
+            source_activity_log=log,
+        )
+        logger.info(
+            f"[NutAgent] Created NutritionLog {nutrition_log.id}: "
+            f"{meal_type} ~{estimated_kcal} kcal (confidence={confidence})"
+        )
+
+        # Reactive threshold check — no nightly batch needed
+        self._check_threshold(patient, today)
+
+    def _check_threshold(self, patient, today) -> None:
+        from .nutrition_utils import get_threshold_kcal, get_daily_kcal_total, get_consecutive_low_days
+        from alerts.models import Alert, AlertType
+
+        threshold = get_threshold_kcal(patient)
+        if threshold is None:
+            return
+
+        daily_total = get_daily_kcal_total(patient.id, today)
+
+        # Only alert if today is below threshold
+        if daily_total >= threshold:
+            return
+
+        consecutive = get_consecutive_low_days(patient, today, window=3)
+        if consecutive < 2:
+            return  # Single day below threshold — not yet alertable
+
+        alert_type, _ = AlertType.objects.get_or_create(
+            code='NUTRITION_LOW',
+            defaults={
+                'name': 'Low Nutrition Intake',
+                'category': 'HEALTH_TREND',
+                'default_severity': 'WARNING',
+            }
+        )
+
+        # Avoid duplicate alerts for the same patient on the same day
+        if Alert.objects.filter(
+            alert_type=alert_type, patient=patient,
+            created_at__date=today
+        ).exists():
+            return
+
+        Alert.objects.create(
+            alert_type=alert_type,
+            patient=patient,
+            severity='WARNING',
+            title='Low Nutrition Alert',
+            message=(
+                f"Caloric intake ({daily_total} kcal) is below "
+                f"{patient.nutrition_alert_threshold_percent}% of daily target "
+                f"({patient.daily_calorie_target} kcal) for {consecutive} consecutive days."
+            ),
+            context_data={
+                'today_kcal': daily_total,
+                'target_kcal': patient.daily_calorie_target,
+                'threshold_kcal': threshold,
+                'consecutive_low_days': consecutive,
+            },
+        )
+        logger.info(f"[NutAgent] Created NUTRITION_LOW alert for patient {patient.id}")
+
+    def _queue_clarification(self, log, question: str, context: str, priority: int) -> None:
+        from .models import PendingQuestion  # already exists from Section 2
+        PendingQuestion.objects.create(
+            patient=log.patient,
+            question=question,
+            context=context,
+            source='NUTRITION_AGENT',
+            source_object_type='PatientActivityLog',
+            source_object_id=log.id,
+            priority=priority,
+            expires_at=timezone.now() + __import__('datetime').timedelta(hours=6),
+        )
+        logger.info(f"[NutAgent] Queued clarification for log {log.id}: '{question}'")
+
+    def _build_context(self, log) -> str:
+        from .models import NutritionLog
+
+        patient = log.patient
+        today = date.today()
 
         today_logs = NutritionLog.objects.filter(
-            patient=patient,
-            meal_time__date=today,
-            estimated_kcal__isnull=False
-        )
-        today_kcal = sum(l.estimated_kcal for l in today_logs)
+            patient=patient, meal_time__date=today
+        ).order_by('meal_time')
 
-        # Mark below_threshold
-        today_logs.update(below_threshold=(today_kcal < threshold_kcal))
+        today_lines = [
+            f"  - {nl.meal_type} ~{nl.estimated_kcal} kcal: {nl.description}"
+            for nl in today_logs
+        ] or ['  (none yet)']
 
-        # Check consecutive low days
-        if today_kcal < threshold_kcal:
-            low_days = 0
-            for i in range(CONSECUTIVE_DAYS_THRESHOLD):
-                day = today - timedelta(days=i)
-                day_kcal = (
-                    NutritionLog.objects.filter(
-                        patient=patient,
-                        meal_time__date=day,
-                        estimated_kcal__isnull=False
-                    ).aggregate(total=models.Sum('estimated_kcal'))['total'] or 0
-                )
-                if day_kcal < threshold_kcal:
-                    low_days += 1
-            if low_days >= CONSECUTIVE_DAYS_THRESHOLD:
-                alert_type, _ = AlertType.objects.get_or_create(
-                    code='NUTRITION_LOW',
-                    defaults={
-                        'name': 'Low Nutrition Intake',
-                        'category': 'HEALTH_TREND',
-                        'default_severity': 'WARNING',
-                        'message_template': 'Patient {patient_name} has been below their nutrition target for {days} consecutive days.',
-                    }
-                )
-                Alert.objects.create(
-                    alert_type=alert_type,
-                    patient=patient,
-                    severity='WARNING',
-                    title='Low Nutrition Alert',
-                    message=f'Caloric intake below {patient.nutrition_alert_threshold_percent}% of target for {low_days} consecutive days.',
-                    context_data={'today_kcal': today_kcal, 'target': target, 'threshold_kcal': threshold_kcal},
-                )
+        today_kcal = sum(nl.estimated_kcal or 0 for nl in today_logs)
+        target = patient.daily_calorie_target
+        target_str = f"{today_kcal} / {target} kcal" if target else f"{today_kcal} kcal logged (no target set)"
+
+        return f"""PATIENT: {patient.user.get_full_name()}
+DATE: {today}
+TIME OF LOG: {log.observed_at.strftime('%Y-%m-%d %H:%M')}
+
+WHAT THE PATIENT SAID (activity log description):
+"{log.description}"
+
+TODAY'S NUTRITION LOGS ALREADY RECORDED:
+{chr(10).join(today_lines)}
+DAILY TOTAL SO FAR: {target_str}
+"""
 ```
 
-**Celery Beat schedule** (in `backend/carepal/settings.py` or `celery.py`):
+---
 
-```python
-'check-daily-nutrition': {
-    'task': 'agent.tasks.check_daily_nutrition_threshold',
-    'schedule': crontab(hour=21, minute=0),
-},
+### 3.8 Migrations Checklist
+
+```bash
+docker compose exec backend python manage.py makemigrations patients --name="add_nutrition_fields"
+docker compose exec backend python manage.py makemigrations agent --name="add_nutrition_log"
+docker compose exec backend python manage.py migrate
 ```
+
+---
+
+### 3.9 Summary of Files Changed / Created
+
+| File | Change |
+|---|---|
+| `backend/patients/models.py` | Add `daily_calorie_target`, `nutrition_alert_threshold_percent` to `PatientProfile` |
+| `backend/agent/models.py` | Add `NutritionLog` model |
+| `backend/agent/signals.py` | Add `elif activity_type == 'MEAL'` branch — 3 lines |
+| `backend/agent/tasks.py` | Add `process_nutrition_log` Celery task |
+| `backend/agent/nutrition_monitor_agent.py` | New — full agent class |
+| `backend/agent/nutrition_utils.py` | New — pure calculation helpers |
+| `backend/agent/live_consumer.py` | System prompt update only (MEAL details schema + logging instructions) |
+
+> **No new signal infrastructure, no Celery beat schedule, no new `PendingQuestion` model** — all reused from Section 2.
 
 ---
 
