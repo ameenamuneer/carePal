@@ -27,24 +27,18 @@
 
 ## 1. Access Control & Account Types
 
-### Current State
-
-`users.User` has `user_type` field with choices `PATIENT / FAMILY / DOCTOR / ADMIN`. This field is stored but **never checked** by any DRF view or WebSocket consumer. There is no model linking Doctor accounts to PatientProfiles (unlike `family.FamilyMember` which links family users to patients).
+### Status: **Implemented**
 
 ---
 
-### 1.1 New Model — `ClinicalRelationship`
+### 1.1 Model — `ClinicalRelationship`
 
 **File:** `backend/users/models.py`
 
-Add after the existing `User` model definition.
+Links a DOCTOR user to the PatientProfiles they are authorised to view/manage. Mirrors `family.FamilyMember` for the clinical side. Includes **granular per-link permission booleans** (not in the original plan):
 
 ```python
 class ClinicalRelationship(models.Model):
-    """
-    Links a DOCTOR user to the PatientProfiles they are authorised to view/manage.
-    Mirror of family.FamilyMember for the clinical side.
-    """
     ROLE_CHOICES = [
         ('PRIMARY', 'Primary Physician'),
         ('SPECIALIST', 'Specialist'),
@@ -52,20 +46,24 @@ class ClinicalRelationship(models.Model):
         ('CONSULTANT', 'Consultant'),
     ]
 
-    doctor = models.ForeignKey(
-        'users.User',
-        on_delete=models.CASCADE,
-        related_name='clinical_relationships',
-        limit_choices_to={'user_type': 'DOCTOR'},
-    )
-    patient = models.ForeignKey(
-        'patients.PatientProfile',
-        on_delete=models.CASCADE,
-        related_name='clinical_relationships',
-    )
-    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='PRIMARY')
-    is_active = models.BooleanField(default=True)
-    notes = models.TextField(blank=True)
+    doctor  = models.ForeignKey('users.User', on_delete=models.CASCADE,
+                related_name='clinical_relationships',
+                limit_choices_to={'user_type': 'DOCTOR'})
+    patient = models.ForeignKey('patients.PatientProfile', on_delete=models.CASCADE,
+                related_name='clinical_relationships')
+    role    = models.CharField(max_length=20, choices=ROLE_CHOICES, default='PRIMARY')
+
+    # Granular permissions
+    can_view_vitals       = models.BooleanField(default=True)
+    can_view_activity_log = models.BooleanField(default=True)
+    can_view_medications  = models.BooleanField(default=True)
+    can_edit_medications  = models.BooleanField(default=True)
+    can_view_alerts       = models.BooleanField(default=True)
+    can_view_appointments = models.BooleanField(default=True)
+    can_edit_appointments = models.BooleanField(default=True)
+
+    is_active  = models.BooleanField(default=True)
+    notes      = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -73,192 +71,161 @@ class ClinicalRelationship(models.Model):
         db_table = 'clinical_relationships'
         unique_together = ['doctor', 'patient']
 
-    def __str__(self):
-        return f"Dr {self.doctor.get_full_name()} → {self.patient.user.get_full_name()}"
+    def has_permission(self, permission: str) -> bool:
+        permission_map = {
+            'view_vitals':        self.can_view_vitals,
+            'view_activity_log':  self.can_view_activity_log,
+            'view_medications':   self.can_view_medications,
+            'edit_medications':   self.can_edit_medications,
+            'view_alerts':        self.can_view_alerts,
+            'view_appointments':  self.can_view_appointments,
+            'edit_appointments':  self.can_edit_appointments,
+        }
+        return permission_map.get(permission, False)
 ```
 
-Run `python manage.py makemigrations users` after adding this.
+Migration: `users` app migration for `ClinicalRelationship`.
 
 ---
 
-### 1.2 DRF Permission Classes
+### 1.2 `FamilyMember` — Granular Permission Fields
 
-**File:** `backend/users/permissions.py` (create new file)
+**File:** `backend/family/models.py`
+
+`FamilyMember` was also updated with per-link permission booleans and a `has_permission()` helper to match the pattern:
 
 ```python
-from rest_framework.permissions import BasePermission
-from family.models import FamilyMember
-from users.models import ClinicalRelationship
+can_view_vitals         = models.BooleanField(default=True)
+can_view_medications    = models.BooleanField(default=True)
+can_view_activity_log   = models.BooleanField(default=True)
+can_view_alerts         = models.BooleanField(default=True)
+can_view_medical_history = models.BooleanField(default=False)
+can_acknowledge_alerts  = models.BooleanField(default=True)
 
-
-class IsPatient(BasePermission):
-    def has_permission(self, request, view):
-        return request.user.is_authenticated and request.user.user_type == 'PATIENT'
-
-
-class IsFamily(BasePermission):
-    def has_permission(self, request, view):
-        return request.user.is_authenticated and request.user.user_type == 'FAMILY'
-
-
-class IsDoctor(BasePermission):
-    def has_permission(self, request, view):
-        return request.user.is_authenticated and request.user.user_type == 'DOCTOR'
-
-
-class IsAdmin(BasePermission):
-    def has_permission(self, request, view):
-        return request.user.is_authenticated and request.user.user_type == 'ADMIN'
-
-
-class IsFamilyOrDoctor(BasePermission):
-    def has_permission(self, request, view):
-        return request.user.is_authenticated and request.user.user_type in ('FAMILY', 'DOCTOR', 'ADMIN')
-
-
-class CanAccessPatientData(BasePermission):
-    """
-    Object-level permission. Pass a PatientProfile as the object.
-    - PATIENT: only their own profile.
-    - FAMILY: only linked patients (active FamilyMember).
-    - DOCTOR: only linked patients (active ClinicalRelationship).
-    - ADMIN: all patients.
-    """
-    def has_object_permission(self, request, view, obj):
-        # obj is expected to be a PatientProfile
-        from patients.models import PatientProfile
-        if isinstance(obj, PatientProfile):
-            patient = obj
-        else:
-            patient = getattr(obj, 'patient', None)
-        if patient is None:
-            return False
-
-        user = request.user
-        if user.user_type == 'PATIENT':
-            return hasattr(user, 'patient_profile') and user.patient_profile == patient
-        if user.user_type == 'FAMILY':
-            return FamilyMember.objects.filter(
-                user=user, patient=patient, is_active=True
-            ).exists()
-        if user.user_type == 'DOCTOR':
-            return ClinicalRelationship.objects.filter(
-                doctor=user, patient=patient, is_active=True
-            ).exists()
-        if user.user_type == 'ADMIN':
-            return True
-        return False
+def has_permission(self, permission: str) -> bool: ...
 ```
 
-Apply `CanAccessPatientData` as `permission_classes` on every DRF view that accepts a `patient_id` URL segment. Call `self.check_object_permissions(request, patient)` after fetching the `PatientProfile`.
+> **Note:** `FamilyMember` does **not** have `can_edit_medications` — only doctors can edit medications. The Connect app enforces this: `canEditMedicationsForActivePatient` returns `True` only when `userType == 'DOCTOR'` and the linked `ClinicalRelationship.can_edit_medications == true`.
 
 ---
 
-### 1.3 WebSocket Access Control
+### 1.3 DRF Permission Classes
+
+**File:** `backend/users/permissions.py`
+
+```python
+class IsPatient(BasePermission): ...         # user_type == 'PATIENT'
+class IsFamily(BasePermission): ...          # user_type == 'FAMILY'
+class IsDoctor(BasePermission): ...          # user_type == 'DOCTOR'
+class IsAdmin(BasePermission): ...           # user_type == 'ADMIN'
+class IsFamilyOrDoctor(BasePermission): ...  # user_type in ('FAMILY', 'DOCTOR', 'ADMIN')
+
+class CanAccessPatientData(BasePermission):
+    """Object-level. Pass PatientProfile as obj."""
+    # PATIENT → own profile only
+    # FAMILY  → active FamilyMember link
+    # DOCTOR  → active ClinicalRelationship link
+    # ADMIN   → all patients
+```
+
+Additionally, two **per-permission helper functions** were implemented (not in the original plan):
+
+```python
+def get_accessible_patient_ids(user) -> list[int]:
+    """Returns list of patient PKs the user may access, regardless of type."""
+
+def family_can(user, patient, permission: str) -> bool:
+    """True if user is an active FamilyMember with the given permission flag."""
+
+def doctor_can(user, patient, permission: str) -> bool:
+    """True if user is an active ClinicalRelationship with the given permission flag."""
+```
+
+These helpers are used by views that need fine-grained per-feature access checks beyond simple patient-access.
+
+---
+
+### 1.4 Serializers
+
+**File:** `backend/users/serializers.py`
+
+```python
+class ClinicalRelationshipSerializer(ModelSerializer):
+    doctor_name  = SerializerMethodField()   # read-only
+    patient_name = SerializerMethodField()   # read-only
+    # doctor, created_at, updated_at are read_only_fields
+    # patient and role are writable on create
+```
+
+**File:** `backend/family/serializers.py`
+
+`FamilyMemberListSerializer` and `FamilyMemberSerializer` both expose the permission fields:
+
+```
+can_view_vitals, can_view_medications, can_view_activity_log,
+can_view_alerts, can_acknowledge_alerts, (can_view_medical_history on full serializer)
+```
+
+---
+
+### 1.5 `ClinicalRelationshipViewSet` API
+
+**File:** `backend/users/views.py`  
+**Registered at:** `backend/users/urls.py` → `router.register(r'clinical-relationships', ...)`
+
+| Method | URL | Who | Behaviour |
+|---|---|---|---|
+| `POST` | `/api/v1/auth/clinical-relationships/` | DOCTOR | Creates link; `doctor` field auto-set to `request.user` |
+| `GET` | `/api/v1/auth/clinical-relationships/` | DOCTOR / ADMIN | Lists own links (DOCTOR) or all (ADMIN) |
+| `DELETE` | `/api/v1/auth/clinical-relationships/{id}/` | DOCTOR / ADMIN | Removes link |
+| `GET` | `/api/v1/auth/clinical-relationships/my-patients/` | DOCTOR | Lists active patients linked to this doctor |
+| `GET` | `/api/v1/auth/clinical-relationships/my-doctors/` | PATIENT | Lists doctors linked to this patient |
+
+> **Bug fixed during implementation:** `doctor` was initially writable in the serializer, causing a `{"doctor":["This field is required."]}` error on POST. Fixed by adding `doctor` to `read_only_fields`.
+
+---
+
+### 1.6 `FamilyMemberViewSet` — `get_queryset` Fix
+
+**File:** `backend/family/views.py`
+
+For `FAMILY` users, `get_queryset` was returning all `FamilyMember` rows for the linked patient (i.e. the entire family). Changed to return only `FamilyMember.objects.filter(user=request.user)` — the logged-in user's own links only.
+
+---
+
+### 1.7 WebSocket Access Control
 
 **File:** `backend/agent/live_consumer.py`
 
-#### Patient-only connect guard
+Patient-only connect guard is in place. Non-PATIENT users are rejected with code 4003.
 
-In `GeminiLiveConsumer.connect()`, immediately after the user authentication check (line ~42), add:
+#### Remote Viewer Consumer
 
-```python
-if self.user.user_type != 'PATIENT':
-    await self.close(code=4003)
-    return
-patient = await database_sync_to_async(
-    PatientProfile.objects.filter(user=self.user).first
-)()
-if not patient:
-    await self.close(code=4004)
-    return
-self.patient = patient
-```
+**File:** `backend/agent/remote_viewer_consumer.py`
 
-#### Remote viewer WebSocket consumer
+FAMILY / DOCTOR / ADMIN WebSocket consumer. Joins `patient_{patient_id}_updates` channel group after verifying access via `FamilyMember` or `ClinicalRelationship`. Forwards `vital_recorded`, `activity_logged`, `alert_created`, `summary_updated` events to connected viewers.
 
-**File:** `backend/agent/remote_viewer_consumer.py` (create new file)
-
-This consumer is for FAMILY and DOCTOR accounts. It joins the channel group `patient_{patient_id}_updates` and forwards any events (vitals, activity logs, alerts, messages) pushed to that group.
-
-```python
-from channels.generic.websocket import AsyncJsonWebsocketConsumer
-from channels.db import database_sync_to_async
-from family.models import FamilyMember
-from users.models import ClinicalRelationship
-from patients.models import PatientProfile
-
-
-class RemoteViewerConsumer(AsyncJsonWebsocketConsumer):
-    async def connect(self):
-        self.user = self.scope.get('user')
-        if not self.user or not self.user.is_authenticated:
-            await self.close(code=4001)
-            return
-        if self.user.user_type not in ('FAMILY', 'DOCTOR', 'ADMIN'):
-            await self.close(code=4003)
-            return
-
-        patient_id = self.scope['url_route']['kwargs']['patient_id']
-        authorized = await self._check_access(patient_id)
-        if not authorized:
-            await self.close(code=4005)
-            return
-
-        self.group_name = f'patient_{patient_id}_updates'
-        await self.channel_layer.group_add(self.group_name, self.channel_name)
-        await self.accept()
-
-    async def disconnect(self, code):
-        if hasattr(self, 'group_name'):
-            await self.channel_layer.group_discard(self.group_name, self.channel_name)
-
-    @database_sync_to_async
-    def _check_access(self, patient_id):
-        try:
-            patient = PatientProfile.objects.get(pk=patient_id)
-        except PatientProfile.DoesNotExist:
-            return False
-        if self.user.user_type == 'FAMILY':
-            return FamilyMember.objects.filter(
-                user=self.user, patient=patient, is_active=True
-            ).exists()
-        if self.user.user_type == 'DOCTOR':
-            return ClinicalRelationship.objects.filter(
-                doctor=self.user, patient=patient, is_active=True
-            ).exists()
-        return self.user.user_type == 'ADMIN'
-
-    # Handlers for each event type pushed to the group
-    async def vital_recorded(self, event):
-        await self.send_json({'type': 'vital_recorded', 'data': event['data']})
-
-    async def activity_logged(self, event):
-        await self.send_json({'type': 'activity_logged', 'data': event['data']})
-
-    async def alert_created(self, event):
-        await self.send_json({'type': 'alert_created', 'data': event['data']})
-
-    async def summary_updated(self, event):
-        await self.send_json({'type': 'summary_updated', 'data': event['data']})
-```
-
-**File:** `backend/carepal/routing.py` — add the new path:
-
+**File:** `backend/carepal/routing.py`:
 ```python
 path('ws/remote-viewer/<int:patient_id>/', RemoteViewerConsumer.as_asgi()),
 ```
 
-#### Live-push from existing tool handlers
+---
 
-In `live_consumer.py`, after every `save_vital_reading` and `_save_activity_log` call, send a push to the remote viewer group:
+### 1.8 Connect App (Flutter) Implementation
 
-```python
-await self.channel_layer.group_send(
-    f'patient_{self.patient.id}_updates',
-    {'type': 'vital_recorded', 'data': {...}}
-)
-```
+**New app:** `carepal_connect` — for DOCTOR and FAMILY account types.
+
+| File | Purpose |
+|---|---|
+| `services/auth_service.dart` | Register (`POST /api/v1/auth/register/`), login, logout, profile |
+| `services/link_service.dart` | Doctor: `linkPatientAsDoctor`, `getMyPatients`, `unlinkPatient` via `/auth/clinical-relationships/`. Family: `linkPatientAsFamily`, `getMyFamilyLinks`, `unlinkFamilyPatient` via `/family/members/` |
+| `providers/patient_provider.dart` | Holds active patient state; `loadLinks(userType)` calls the correct endpoint based on account type; `canEditMedicationsForActivePatient(userType)` checks `ClinicalRelationship.can_edit_medications` |
+| `screens/register_screen.dart` | Registration with `user_type` selection (DOCTOR / FAMILY) |
+| `screens/link_patient_screen.dart` | Enter patient ID → calls `linkPatientAsDoctor` or `linkPatientAsFamily` |
+| `screens/activity_log_screen.dart` | Reads `PatientActivityLog` for linked patient |
+
+**Permission enforcement in UI:** The medications screen checks `canEditMedicationsForActivePatient` before showing Add / Edit / Delete buttons. Only DOCTOR users with `can_edit_medications: true` on their `ClinicalRelationship` see these controls.
 
 ---
 
