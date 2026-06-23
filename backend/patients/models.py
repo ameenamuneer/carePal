@@ -129,7 +129,17 @@ class PatientProfile(models.Model):
     # Medical History
     medical_notes = models.TextField(blank=True, help_text="Additional medical history or notes")
     last_hospital_visit = models.DateField(null=True, blank=True)
-    
+
+    # Nutrition tracking
+    daily_calorie_target = models.IntegerField(
+        null=True, blank=True,
+        help_text="Target daily caloric intake in kcal. Null means no tracking."
+    )
+    nutrition_alert_threshold_percent = models.IntegerField(
+        default=70,
+        help_text="Alert if daily intake falls below this % of target (e.g. 70 = alert if <70% reached)."
+    )
+
     # System fields
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)

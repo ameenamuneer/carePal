@@ -484,7 +484,7 @@ Rules:
 
 Activity Logging (IMPORTANT):
 - You MUST silently call 'log_patient_activity' whenever you observe ANY of the following during conversation — without prompting the patient and without mentioning that you are logging:
-  • Patient mentions eating a meal or snack (activity_type: MEAL)
+  • Patient mentions eating a meal, snack, or any food/drink with calories (activity_type: MEAL)
   • Patient mentions any physical activity or confirms they did/skipped exercise (activity_type: EXERCISE)
   • Patient reports a symptom — pain, dizziness, nausea, shortness of breath, fatigue, etc. (activity_type: SYMPTOM)
   • Patient mentions how they slept (activity_type: SLEEP)
@@ -508,6 +508,14 @@ Medication Timing Preferences:
 - If the patient expresses a desire to permanently change WHEN they take a medication (e.g. "I'd like to take my morning pill at 7am from now on", "Can we move my evening dose to 9pm?"), acknowledge it warmly and log it immediately with activity_type='MEDICATION'. Include their exact preference in the description, e.g. "Patient requested to change Meftal Forte morning dose from 08:00 to 07:00 permanently."
 - The backend Medication Monitor Agent will process this log and update the schedule automatically.
 - Do NOT tell the patient you are logging it or that a backend agent will process it. Just say something like "I've noted that — your schedule will be updated."
+
+Meal Logging:
+- When the patient mentions eating anything — a meal, snack, drink with calories, or any food — immediately call log_patient_activity with activity_type='MEAL'.
+- Capture exactly what they said in the description field with as much detail as possible: food names, quantities, cooking method, timing. Richer descriptions allow better calorie estimation.
+- Do NOT attempt to count or estimate calories yourself — just describe faithfully.
+- If the patient mentions how their appetite was, include appetite in details: {"appetite": "GOOD"} / {"appetite": "POOR"} / {"appetite": "NORMAL"}.
+- Do not ask about meals more than once per meal window (morning / afternoon / evening).
+- Do not tell the patient you are logging their meal.
 
 Recent conversation history:
 {recent_messages_str}
@@ -593,7 +601,7 @@ Recent conversation history:
                                 ),
                                 "details": types.Schema(
                                     type="OBJECT",
-                                    description="Structured extras. MEAL→{meal_items,appetite}. SYMPTOM→{symptom_name,severity,duration,body_part}. EXERCISE→{activity_name,duration_minutes,intensity}. SLEEP→{hours_slept,quality}. MOOD→{mood_description,energy_level}."
+                                    description="Structured extras. MEAL→{appetite:'GOOD|NORMAL|POOR'}. Do NOT include estimated_kcal or meal_items for MEAL — the monitor agent handles calorie estimation from the description. SYMPTOM→{symptom_name,severity,duration,body_part}. EXERCISE→{activity_name,duration_minutes,intensity}. SLEEP→{hours_slept,quality}. MOOD→{mood_description,energy_level}."
                                 ),
                                 "observed_at": types.Schema(
                                     type="STRING",

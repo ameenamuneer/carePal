@@ -609,6 +609,7 @@ class PendingQuestion(models.Model):
     """
     SOURCE_CHOICES = [
         ('MEDICATION_AGENT', 'Medication Monitor Agent'),
+        ('NUTRITION_AGENT', 'Nutrition Monitor Agent'),
         ('SYSTEM', 'System'),
         ('DOCTOR', 'Doctor'),
         ('FAMILY', 'Family Member'),
@@ -655,3 +656,60 @@ class PendingQuestion(models.Model):
 
     def __str__(self):
         return f"[{self.source}] {self.question[:60]}"
+
+
+class NutritionLog(models.Model):
+    MEAL_TYPE_CHOICES = [
+        ('BREAKFAST', 'Breakfast'),
+        ('LUNCH', 'Lunch'),
+        ('DINNER', 'Dinner'),
+        ('SNACK', 'Snack'),
+        ('OTHER', 'Other'),
+    ]
+
+    patient = models.ForeignKey(
+        'patients.PatientProfile',
+        on_delete=models.CASCADE,
+        related_name='nutrition_logs',
+    )
+    meal_time = models.DateTimeField(
+        help_text="When the meal was consumed (may differ from when it was logged)"
+    )
+    meal_type = models.CharField(max_length=15, choices=MEAL_TYPE_CHOICES, default='OTHER')
+    description = models.TextField(help_text="What the patient said they ate")
+    estimated_kcal = models.IntegerField(
+        null=True, blank=True,
+        help_text="AI-estimated kilocalories for this meal",
+    )
+    items = models.JSONField(
+        default=list, blank=True,
+        help_text="Parsed food items: [{'name': 'rice', 'qty': '1 cup', 'kcal': 200}]",
+    )
+    appetite = models.CharField(
+        max_length=10, blank=True,
+        help_text="GOOD | POOR | NORMAL — patient's reported appetite",
+    )
+    below_threshold = models.BooleanField(
+        default=False,
+        help_text="True if daily total was below patient threshold when this log was saved",
+    )
+    # Audit trail — mirrors MedicationAdherence.source_activity_log
+    source_activity_log = models.OneToOneField(
+        'agent.PatientActivityLog',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='nutrition_log',
+        help_text="The MEAL activity log entry that triggered this record",
+    )
+    logged_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'nutrition_logs'
+        ordering = ['-meal_time']
+        indexes = [models.Index(fields=['patient', '-meal_time'])]
+
+    def __str__(self):
+        return (
+            f"{self.patient.user.get_full_name()} | "
+            f"{self.meal_type} | {self.meal_time:%Y-%m-%d %H:%M}"
+        )
