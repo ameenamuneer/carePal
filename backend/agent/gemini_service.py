@@ -26,12 +26,12 @@ class GeminiService:
         
         # Use Gemini 2.0 Flash (cheaper than Pro, supports native audio)
         self.model = genai.GenerativeModel(
-            'gemini-2.0-flash-exp',
+            'gemini-2.5-flash',
             generation_config=self._get_generation_config(),
             safety_settings=self._get_safety_settings()
         )
         
-        logger.info("GeminiService initialized with gemini-2.0-flash-exp")
+        logger.info("GeminiService initialized with gemini-2.5-flash")
     
     def _get_generation_config(self) -> dict:
         """Get generation configuration for consistent healthcare responses"""
@@ -144,7 +144,7 @@ class GeminiService:
             
             # Create model with system instruction
             model_with_system = genai.GenerativeModel(
-                'gemini-2.0-flash-exp',
+                'gemini-2.5-flash',
                 generation_config=self._get_generation_config(),
                 safety_settings=self._get_safety_settings(),
                 system_instruction=system_instruction

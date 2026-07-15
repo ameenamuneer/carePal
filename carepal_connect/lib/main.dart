@@ -6,6 +6,7 @@ import 'providers/auth_provider.dart';
 import 'providers/patient_provider.dart';
 import 'providers/activity_log_provider.dart';
 import 'providers/medication_provider.dart';
+import 'providers/dashboard_provider.dart';
 import 'screens/login_screen.dart';
 import 'screens/home_screen.dart';
 import 'core/app_theme.dart';
@@ -27,10 +28,12 @@ void main() async {
       final patientProvider = PatientProvider();
       final activityLogProvider = ActivityLogProvider();
       final medicationProvider = MedicationProvider();
+      final dashboardProvider = DashboardProvider();
 
       // Bind sibling providers so AuthProvider can clear them on session change.
       authProvider.bindDependentProviders(
-          patientProvider, activityLogProvider, medicationProvider);
+          patientProvider, activityLogProvider, medicationProvider,
+          dashboardProvider: dashboardProvider);
 
       runApp(
         MultiProvider(
@@ -39,6 +42,7 @@ void main() async {
             ChangeNotifierProvider.value(value: patientProvider),
             ChangeNotifierProvider.value(value: activityLogProvider),
             ChangeNotifierProvider.value(value: medicationProvider),
+            ChangeNotifierProvider.value(value: dashboardProvider),
           ],
           child: const CarePalConnectApp(),
         ),

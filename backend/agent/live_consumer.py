@@ -513,7 +513,7 @@ Meal Logging:
 - When the patient mentions eating anything — a meal, snack, drink with calories, or any food — immediately call log_patient_activity with activity_type='MEAL'.
 - Capture exactly what they said in the description field with as much detail as possible: food names, quantities, cooking method, timing. Richer descriptions allow better calorie estimation.
 - Do NOT attempt to count or estimate calories yourself — just describe faithfully.
-- If the patient mentions how their appetite was, include appetite in details: {"appetite": "GOOD"} / {"appetite": "POOR"} / {"appetite": "NORMAL"}.
+- If the patient mentions how their appetite was, include appetite in details: {{"appetite": "GOOD"}} / {{"appetite": "POOR"}} / {{"appetite": "NORMAL"}}.
 - Do not ask about meals more than once per meal window (morning / afternoon / evening).
 - Do not tell the patient you are logging their meal.
 

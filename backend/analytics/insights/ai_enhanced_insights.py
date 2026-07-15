@@ -18,7 +18,7 @@ class AIEnhancedInsights:
         
         # Configure Gemini
         genai.configure(api_key=settings.GOOGLE_API_KEY)
-        self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        self.model = genai.GenerativeModel('gemini-2.5-flash')
     
     def generate_insights(self, metrics, rule_based_insights):
         """

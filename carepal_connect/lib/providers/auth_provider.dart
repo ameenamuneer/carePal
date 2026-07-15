@@ -3,6 +3,7 @@ import '../services/auth_service.dart';
 import 'patient_provider.dart';
 import 'activity_log_provider.dart';
 import 'medication_provider.dart';
+import 'dashboard_provider.dart';
 
 class AuthProvider with ChangeNotifier {
   final AuthService _authService = AuthService();
@@ -12,21 +13,25 @@ class AuthProvider with ChangeNotifier {
   PatientProvider? _patientProvider;
   ActivityLogProvider? _activityLogProvider;
   MedicationProvider? _medicationProvider;
+  DashboardProvider? _dashboardProvider;
 
   void bindDependentProviders(
     PatientProvider patientProvider,
     ActivityLogProvider activityLogProvider,
-    MedicationProvider medicationProvider,
-  ) {
+    MedicationProvider medicationProvider, {
+    DashboardProvider? dashboardProvider,
+  }) {
     _patientProvider = patientProvider;
     _activityLogProvider = activityLogProvider;
     _medicationProvider = medicationProvider;
+    _dashboardProvider = dashboardProvider;
   }
 
   void _clearDependentProviders() {
     _patientProvider?.clear();
     _activityLogProvider?.clear();
     _medicationProvider?.clear();
+    _dashboardProvider?.clear();
   }
 
   bool _isAuthenticated = false;

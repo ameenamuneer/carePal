@@ -9,7 +9,8 @@ from .views import (
     ScheduledReportViewSet,
     ReportTemplateViewSet,
     PatientDashboardView,
-    FamilyDashboardView
+    FamilyDashboardView,
+    DoctorDashboardView,
 )
 
 app_name = 'analytics'
@@ -27,6 +28,7 @@ urlpatterns = [
     # Dashboards
     path('dashboard/patient/', PatientDashboardView.as_view(), name='patient-dashboard'),
     path('dashboard/family/', FamilyDashboardView.as_view(), name='family-dashboard'),
+    path('dashboard/doctor/', DoctorDashboardView.as_view(), name='doctor-dashboard'),
     
     # Router URLs
     path('', include(router.urls)),

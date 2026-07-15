@@ -6,6 +6,7 @@ import '../providers/auth_provider.dart';
 import '../providers/patient_provider.dart';
 import '../providers/activity_log_provider.dart';
 import '../providers/medication_provider.dart';
+import '../providers/dashboard_provider.dart';
 import 'dashboard_screen.dart';
 import 'activity_log_screen.dart';
 import 'patients_screen.dart';
@@ -212,6 +213,11 @@ class _PatientSwitcherBar extends StatelessWidget {
               patientProvider.setActivePatient(p.id, p.name);
               context.read<ActivityLogProvider>().setPatientAndReload(p.id);
               context.read<MedicationProvider>().setPatientAndReload(p.id);
+              context.read<DashboardProvider>().load(
+                    patientId: p.id,
+                    isDoctor: context.read<AuthProvider>().isDoctor,
+                    force: true,
+                  );
             },
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 200),

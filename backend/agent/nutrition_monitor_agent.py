@@ -181,7 +181,7 @@ class NutritionMonitorAgent:
 
         try:
             response = self.client.models.generate_content(
-                model='gemini-2.0-flash',
+                model='gemini-2.5-flash',
                 contents=context,
                 config=gtypes.GenerateContentConfig(
                     system_instruction=SYSTEM_PROMPT,
