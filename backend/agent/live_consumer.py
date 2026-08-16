@@ -5,8 +5,6 @@ import logging
 import asyncio
 import base64
 import numpy as np
-import torch
-from silero_vad import load_silero_vad
 from channels.generic.websocket import AsyncWebsocketConsumer
 from google import genai
 from google.genai import types
@@ -23,6 +21,8 @@ from medications.models import Medication, MedicationAdherence
 from users.models import User
 from agent.models import AgentSession, AgentMessage
 from agent.camera_pan_controller import CameraPanController
+from agent.energy_vad import EnergyEosDetector
+from agent.elevenlabs_stt import transcribe_elevenlabs
 
 logger = logging.getLogger(__name__)
 
@@ -30,60 +30,38 @@ logger = logging.getLogger(__name__)
 # Configure the model
 MODEL = "models/gemini-2.5-flash-native-audio-preview-12-2025"
 
-# VAD_MODE controls how voice activity is handled between the client mic stream
-# and Gemini Live:
-#   "off"             – no backend VAD. Gemini's automatic activity detection
-#                       decides turn boundaries; all audio is forwarded as-is.
-#   "filter"          – Silero VAD filters silence (saves bandwidth, fewer noise
-#                       hallucinations) and fires a fast barge-in interrupt, but
-#                       Gemini still decides when the user's turn ends.
-#   "manual_activity" – Silero VAD is authoritative. Gemini's automatic activity
-#                       detection is disabled and the backend sends explicit
-#                       activityStart / activityEnd signals, so response
-#                       generation starts the instant speech stops.
-#   "tuned_auto"      – no backend VAD. Gemini's automatic activity detection
-#                       stays ON but is tuned (shorter end-of-turn silence, less
-#                       pause-sensitive) for a faster response without owning the
-#                       fragmentation risk of manual_activity.
-VAD_MODE = "tuned_auto"
+# ── Voice pipeline: mic → energy VAD → ElevenLabs STT → text injection ────────
+#
+# The microphone stream is NEVER forwarded to Gemini as audio. Instead:
+#   1. The model finishes speaking → a listening window opens.
+#   2. Incoming mic frames (PCM16 mono @ 16 kHz) are buffered while the window
+#      is active and the AI is not speaking.
+#   3. A wall-clock energy VAD (polled every VAD_TICK_MS) watches for speech
+#      followed by a sustained silence run and fires end-of-speech.
+#   4. The buffered utterance is transcribed by ElevenLabs Scribe.
+#   5. The transcript is injected as TEXT with turn_complete=True; the model
+#      replies. When it finishes, the window reopens.
+#
+# Gemini's own automatic activity detection is always DISABLED — turn
+# boundaries are driven entirely by text injection.
+INPUT_RATE = 16000
 
-# Modes in which the Silero model must be loaded and run.
-VAD_ENABLED_MODES = ("filter", "manual_activity")
+# Energy VAD tuning (see agent/energy_vad.py). Thresholds are RMS on 0..1.
+VAD_TICK_MS = 100            # how often check_eos() is polled (wall clock)
+VAD_ENERGY_THRESHOLD = 0.012  # frame RMS above this counts as speech
+VAD_MIN_SPEECH_MS = 200      # min cumulative speech before EOS can fire
+VAD_SILENCE_MS = 700         # trailing real-time silence that ends an utterance
 
-# Silero per-frame (32ms) speech-probability thresholds:
-#   VAD_SPEECH_PROB    – above this a frame counts as speech (silence filtering,
-#                        turn boundaries). Raising it rejects faint/distant audio
-#                        but clips soft speech onsets.
-#   VAD_CONFIDENT_PROB – above this a frame counts as confident speech, required
-#                        for the barge-in interrupt. Raise it (e.g. 0.82) if
-#                        distant chatter still cuts off the AI.
-VAD_SPEECH_PROB = 0.75
-VAD_CONFIDENT_PROB = 0.9
+# ElevenLabs Scribe STT (see agent/elevenlabs_stt.py). Language auto-detected.
+STT_MODEL_ID = "scribe_v2"
+STT_TIMEOUT_MS = 20000
 
-# Trailing silent packets to keep forwarding after speech stops. Kept above
-# Gemini's recommended >=500ms end-of-speech threshold (~32ms per packet) so
-# manual_activity mode does not clip natural pauses mid-utterance.
-SILENCE_HANGOVER_CHUNKS = 16
-
-# manual_activity: require this many consecutive speech packets (~32ms each)
-# before sending activityStart / firing a barge-in interrupt. Debounces brief
-# background noise so it cannot falsely interrupt Gemini's playback. Audio is
-# still forwarded immediately; only the start/interrupt signal is delayed.
-VAD_START_DEBOUNCE_CHUNKS = 3
-
-# tuned_auto: parameters for Gemini's built-in activity detection. Shorter
-# silence than the default speeds up turn-end; LOW end sensitivity keeps it from
-# cutting on natural pauses. Milliseconds.
-AUTO_VAD_SILENCE_MS = 400
-AUTO_VAD_PREFIX_PADDING_MS = 100
-
-# When False, client camera frames are NOT forwarded to the Gemini Live model
-# (disables the model's vision; audio still flows). Independent of panning.
+# When True, client camera frames ARE forwarded to the Gemini Live model so it
+# can see (vision macro). Audio is never sent; only frames + injected text.
 SEND_FRAMES_TO_GEMINI = False
 
-# When False, the autonomous camera-pan controller is never started and incoming
-# frames are not processed on the backend (no YOLO tracking, no look-around, no
-# hardware pan commands). The adjust_camera tool becomes a no-op.
+# When True, the autonomous camera-pan controller runs and incoming frames are
+# processed on the backend (YOLO tracking, look-around, hardware pan commands).
 ENABLE_CAMERA_PANNING = False
 
 class GeminiLiveConsumer(AsyncWebsocketConsumer):
@@ -99,19 +77,27 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
             pass
 
         self.ai_is_speaking = False
-        self.silence_hangover_chunks = 0
-        self.activity_started = False  # manual_activity: is a user turn currently open?
-        self.speech_run_chunks = 0     # consecutive speech packets, for start debounce
-        if VAD_MODE in VAD_ENABLED_MODES:
-            try:
-                self.vad_model = load_silero_vad()
-                logger.info(f"Silero VAD model loaded successfully (VAD_MODE={VAD_MODE}).")
-            except Exception as e:
-                logger.error(f"Failed to load Silero VAD: {e}")
-                self.vad_model = None
-        else:
-            self.vad_model = None
-            logger.info("VAD disabled (VAD_MODE=off); routing all audio directly to Gemini.")
+
+        # ── Voice pipeline state ─────────────────────────────────────────────
+        # Mic frames (int16 numpy arrays) buffered for the current utterance.
+        self._mic_buf = []
+        # Energy VAD detector for the current listening window (None = closed).
+        self._eos = None
+        # Is a listening window currently open (model finished speaking)?
+        self._window_active = False
+        # Guard so only one transcription runs at a time.
+        self._transcribing = False
+        # ElevenLabs API key (resolved once; utterances skip STT if absent).
+        self._elevenlabs_key = (
+            os.environ.get("ELEVENLABS_API_KEY")
+            or getattr(settings, "ELEVENLABS_API_KEY", "")
+        )
+        if not self._elevenlabs_key:
+            logger.warning(
+                "ELEVENLABS_API_KEY not set; live mic transcription will be skipped."
+            )
+        # Long-lived wall-clock VAD poller (started once, cancelled on disconnect).
+        self._vad_ticker_task = asyncio.create_task(self._vad_ticker())
 
         # Initialise the camera pan controller
         if ENABLE_CAMERA_PANNING:
@@ -325,6 +311,12 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
 
     async def disconnect(self, close_code):
         self.stop_event.set()
+        if getattr(self, '_vad_ticker_task', None):
+            self._vad_ticker_task.cancel()
+            try:
+                await self._vad_ticker_task
+            except asyncio.CancelledError:
+                pass
         if hasattr(self, 'pan_controller'):
             self.pan_controller.stop()
         if hasattr(self, 'task'):
@@ -334,6 +326,101 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
             except asyncio.CancelledError:
                 pass
         logger.info("Gemini Live WebSocket disconnected")
+
+    # ── Voice pipeline: listening window, VAD ticker, transcribe + inject ─────
+
+    def _begin_window(self):
+        """Open a fresh listening window and start a new energy-VAD detector."""
+        self._mic_buf = []
+        self._eos = EnergyEosDetector(
+            rate=INPUT_RATE,
+            energy_threshold=VAD_ENERGY_THRESHOLD,
+            min_speech_ms=VAD_MIN_SPEECH_MS,
+            silence_ms=VAD_SILENCE_MS,
+        )
+        self._window_active = True
+        logger.info("Listening window OPEN (awaiting user speech).")
+
+    def _close_window(self):
+        """Close the listening window and drop any buffered mic audio."""
+        self._window_active = False
+        self._eos = None
+        self._mic_buf = []
+
+    async def _vad_ticker(self):
+        """
+        Long-lived wall-clock poller. Every VAD_TICK_MS it asks the current
+        detector whether end-of-speech has been reached; if so it closes the
+        window and kicks off transcription + injection.
+        """
+        try:
+            while True:
+                await asyncio.sleep(VAD_TICK_MS / 1000.0)
+                if self.stop_event.is_set():
+                    break
+                if not self._window_active or self._eos is None:
+                    continue
+                if self.ai_is_speaking:
+                    continue
+                try:
+                    if self._eos.check_eos():
+                        # Capture and close before awaiting so new frames start a
+                        # clean window on the next _begin_window().
+                        saw_speech = self._eos.saw_speech
+                        utterance = (
+                            np.concatenate(self._mic_buf)
+                            if self._mic_buf else np.array([], dtype=np.int16)
+                        )
+                        self._close_window()
+                        if saw_speech and utterance.size > 0:
+                            await self._transcribe_and_inject(utterance)
+                        else:
+                            # Nothing meaningful captured; reopen and keep listening.
+                            self._begin_window()
+                except Exception as e:
+                    logger.error(f"VAD ticker error: {e}", exc_info=True)
+        except asyncio.CancelledError:
+            pass
+
+    async def _transcribe_and_inject(self, utterance):
+        """
+        Transcribe a finished utterance with ElevenLabs Scribe and inject the
+        text into Gemini Live as a completed user turn.
+        """
+        if self._transcribing:
+            return
+        self._transcribing = True
+        try:
+            if not self._elevenlabs_key:
+                logger.warning("Skipping STT (no ELEVENLABS_API_KEY); reopening window.")
+                self._begin_window()
+                return
+
+            try:
+                text = await asyncio.to_thread(
+                    transcribe_elevenlabs,
+                    utterance,
+                    INPUT_RATE,
+                    STT_MODEL_ID,
+                    STT_TIMEOUT_MS / 1000.0,
+                    self._elevenlabs_key,
+                )
+            except Exception as e:
+                logger.error(f"ElevenLabs STT failed: {e}")
+                text = ""
+
+            text = (text or "").strip()
+            if not text:
+                logger.info("Empty transcript; reopening listening window.")
+                self._begin_window()
+                return
+
+            logger.info(f"🗣️ Transcript injected: {text!r}")
+            self.current_user_text = text
+            # Inject as a completed user turn. The window reopens on turn_complete.
+            await self.input_queue.put({"text": text})
+        finally:
+            self._transcribing = False
 
     async def receive(self, text_data=None, bytes_data=None):
         """
@@ -350,86 +437,19 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                 payload_data = bytes_data[1:]
 
                 if msg_type_byte == 0x00:
-                    # VAD Check before sending to Gemini
-                    if VAD_MODE in VAD_ENABLED_MODES and self.vad_model is not None and len(payload_data) >= 1024: # 1024 bytes = 512 int16 samples
-                        audio_int16 = np.frombuffer(payload_data, dtype=np.int16)
-                        audio_float32 = audio_int16.astype(np.float32) / 32768.0
-                        tensor = torch.from_numpy(audio_float32)
-
-                        try:
-                            is_speech = False
-                            is_confident_speech = False
-                            max_amp = torch.max(torch.abs(tensor)).item()
-                            for i in range(0, len(tensor), 512):
-                                chunk = tensor[i:i+512]
-                                if len(chunk) < 512:
-                                    continue # Skip trailing short chunks
-                                speech_prob = self.vad_model(chunk, 16000).item()
-                                if speech_prob > VAD_SPEECH_PROB:
-                                    is_speech = True
-                                if speech_prob > VAD_CONFIDENT_PROB:
-                                    is_confident_speech = True
-                                    break
-
-                            prev_vad = getattr(self, 'last_vad_state', False)
-
-                            if is_speech:
-                                self.silence_hangover_chunks = SILENCE_HANGOVER_CHUNKS
-                                self.speech_run_chunks = getattr(self, 'speech_run_chunks', 0) + 1
-                            else:
-                                self.speech_run_chunks = 0
-
-                            if is_speech and not prev_vad:
-                                print(f"🗣️ VAD Triggered: Speech START (Max Amp: {max_amp:.4f})", flush=True)
-                            elif not is_speech and prev_vad:
-                                print(f"🔇 VAD Triggered: Speech END (Max Amp: {max_amp:.4f})", flush=True)
-
-                            self.last_vad_state = is_speech
-
-                            # Speech is "confirmed" only after a short sustained run, so a brief
-                            # background blip cannot open a turn or interrupt playback. NOTE: the
-                            # audio itself is still forwarded below without delay; only the
-                            # activityStart / barge-in signal waits for this confirmation.
-                            speech_confirmed = getattr(self, 'speech_run_chunks', 0) >= VAD_START_DEBOUNCE_CHUNKS
-
-                            # Manual activity: open the user's turn once speech is confirmed.
-                            if VAD_MODE == "manual_activity" and speech_confirmed and not self.activity_started:
-                                self.activity_started = True
-                                await self.input_queue.put({"activity": "start"})
-                                print(f"VAD start confirmed ({self.speech_run_chunks} chunks); sent activityStart.", flush=True)
-
-                            if not is_speech:
-                                if getattr(self, 'silence_hangover_chunks', 0) > 0:
-                                    self.silence_hangover_chunks -= 1
-                                    # DO NOT drop! Let Gemini hear the end-of-speech silence naturally.
-                                else:
-                                    # Silence fully drained past the hangover.
-                                    if VAD_MODE == "manual_activity" and self.activity_started:
-                                        # Close the user's turn -> Gemini starts generating
-                                        # now instead of waiting on its own silence timeout.
-                                        print("VAD end-of-turn: sending activityEnd to trigger fast response.", flush=True)
-                                        self.activity_started = False
-                                        await self.input_queue.put({"activity": "end"})
-                                    print(f"Dropped silent audio. Max Amp: {max_amp:.4f}", flush=True)
-                                    return # Drop silence packet
-
-                            # Fast barge-in interrupt: require sustained (speech_confirmed) AND
-                            # currently confident (prob > 0.75) speech. The debounce stops brief
-                            # noise or echo at partial amplitude from cutting off the AI mid-sentence.
-                            if getattr(self, 'ai_is_speaking', False) and is_confident_speech and speech_confirmed:
-                                print("VAD detected confident sustained speech while AI speaking. Triggering FAST INTERRUPT!", flush=True)
-                                await self.send(bytes_data=bytes([0x03]))
-                                self.ai_is_speaking = False
-                        except Exception as ve:
-                            print(f"VAD error: {ve}", flush=True)
-
-                    # Gemini v1beta multimodal currently expects base64 or raw via specific fields 
-                    # We wrap in base64 here to keep Gemini SDK happy for now.
-                    b64_audio = base64.b64encode(payload_data).decode('utf-8')
-                    await self.input_queue.put({
-                        "mime_type": "audio/pcm;rate=16000",
-                        "data": b64_audio
-                    })
+                    # Mic PCM16 frame. This audio is NEVER sent to Gemini. It is
+                    # only buffered + fed to the energy VAD while a listening
+                    # window is open and the AI is not speaking (half-duplex).
+                    if not self._window_active or self.ai_is_speaking or self._eos is None:
+                        return
+                    if len(payload_data) < 2:
+                        return
+                    frame = np.frombuffer(payload_data, dtype=np.int16)
+                    if frame.size == 0:
+                        return
+                    self._mic_buf.append(frame)
+                    self._eos.push_audio(frame)
+                    return
 
                 elif msg_type_byte == 0x01:
                     b64_image = base64.b64encode(payload_data).decode('utf-8')
@@ -476,8 +496,8 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         Save a vital reading to the database
         """
         try:
-            if not self.user:
-                return {"success": False, "error": "No user context"}
+            if not self.user or not self.user.is_authenticated:
+                return {"success": False, "error": "No authenticated user context"}
 
             patient = PatientProfile.objects.filter(user=self.user).first()
             if not patient:
@@ -724,23 +744,12 @@ Recent conversation history:
             api_key=api_key,
         )
 
-        # In manual_activity mode the backend's Silero VAD drives turn boundaries,
-        # so Gemini's own automatic activity detection must be turned off.
-        realtime_input_config = None
-        if VAD_MODE == "manual_activity":
-            realtime_input_config = types.RealtimeInputConfig(
-                automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
-            )
-        elif VAD_MODE == "tuned_auto":
-            # Keep Gemini's own VAD on, but shorten its end-of-turn silence and make
-            # it less pause-sensitive for a faster response without fragmentation.
-            realtime_input_config = types.RealtimeInputConfig(
-                automatic_activity_detection=types.AutomaticActivityDetection(
-                    silence_duration_ms=AUTO_VAD_SILENCE_MS,
-                    prefix_padding_ms=AUTO_VAD_PREFIX_PADDING_MS,
-                    end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
-                )
-            )
+        # No microphone audio is ever sent to Gemini — turn boundaries are driven
+        # entirely by injected text — so Gemini's own automatic activity detection
+        # must be disabled.
+        realtime_input_config = types.RealtimeInputConfig(
+            automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
+        )
 
         config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
@@ -752,7 +761,6 @@ Recent conversation history:
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Zephyr")
                 )
             ),
-            input_audio_transcription=types.AudioTranscriptionConfig(),
             realtime_input_config=realtime_input_config,
         )
 
@@ -762,10 +770,12 @@ Recent conversation history:
                     self.session = session
                     self.current_user_text = ""
                     self.current_ai_text = ""
-                    # Reset turn state so a reconnect never leaves a half-open activity turn.
-                    self.activity_started = False
-                    self.last_vad_state = False
-                    self.speech_run_chunks = 0
+                    # Fresh connection: open a listening window immediately so the
+                    # user can speak first (no audio is ever sent to the model, so
+                    # it will not greet unprompted). The window is recreated on
+                    # every turn_complete thereafter.
+                    self.ai_is_speaking = False
+                    self._begin_window()
                     logger.info("Connected to Gemini Live")
                     
                     # Start the sender loop
@@ -797,15 +807,6 @@ Recent conversation history:
                                 # 2. Handle Server Signals (turn_complete MUST override audio chunks in the same payload)
                                 server_content = getattr(response, "server_content", None)
                                 if server_content:
-                                    if getattr(server_content, 'input_transcription', None):
-                                        t = server_content.input_transcription
-                                        if hasattr(t, 'text') and t.text:
-                                            self.current_user_text += t.text
-                                        elif hasattr(t, 'parts'):
-                                            for p in t.parts:
-                                                if hasattr(p, 'text') and p.text:
-                                                    self.current_user_text += p.text
-
                                     if getattr(server_content, 'interrupted', False):
                                         logger.info(f"[AI_SPEAKING={self.ai_is_speaking}] Gemini signaled interrupt. Sending 0x03 to frontend.")
                                         await self.send(bytes_data=bytes([0x03]))
@@ -814,14 +815,18 @@ Recent conversation history:
                                     if getattr(server_content, 'turn_complete', False):
                                         logger.info(f"[AI_SPEAKING={self.ai_is_speaking}] Server content: turn_complete=True. Resetting flag.")
                                         self.ai_is_speaking = False
-                                        
+
                                         user_t = self.current_user_text.strip()
                                         ai_t = self.current_ai_text.strip()
                                         if user_t or ai_t:
                                             asyncio.create_task(self.save_turn_messages(user_t, ai_t))
-                                            
+
                                         self.current_user_text = ""
                                         self.current_ai_text = ""
+
+                                        # Model finished speaking → open a fresh
+                                        # listening window for the next utterance.
+                                        self._begin_window()
                                         
                                 # 3. Handle Tool Calls directly on response OR inside model_turn
                                 function_calls = []
@@ -889,6 +894,9 @@ Recent conversation history:
         from vitals.models import VitalReading
 
         try:
+            if not self.user or not self.user.is_authenticated:
+                return {"success": False, "error": "No authenticated user context"}
+
             patient = PatientProfile.objects.filter(user=self.user).first()
             if not patient:
                 return {"success": False, "error": "No patient profile found"}
@@ -997,18 +1005,12 @@ Recent conversation history:
             while True:
                 item = await self.input_queue.get()
 
-                if "activity" in item:
-                    # manual_activity turn boundary signals (Gemini auto-VAD is off)
-                    if item["activity"] == "start":
-                        await self.session.send_realtime_input(activity_start=types.ActivityStart())
-                    elif item["activity"] == "end":
-                        await self.session.send_realtime_input(activity_end=types.ActivityEnd())
-                elif "text" in item:
-                    # It's a text message
+                if "text" in item:
+                    # Injected transcript (or client text) → drives the model's turn.
                     logger.info(f"Sending text to Gemini: {item['text']}")
                     await self.session.send(input=item["text"], end_of_turn=True)
                 else:
-                    # It's media (audio/image) dict {"mime_type":..., "data":...}
+                    # It's media (image) dict {"mime_type":..., "data":...}
                     # Send dict with Base64 exactly as the SDK expects for LiveConnect!
                     await self.session.send(input=item)
                     

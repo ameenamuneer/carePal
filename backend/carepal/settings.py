@@ -221,6 +221,9 @@ OAUTH_CALLBACK_BASE_URL = os.getenv('OAUTH_CALLBACK_BASE_URL', 'http://localhost
 # Google API for Gemini AI
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY', '')
 
+# ElevenLabs Scribe speech-to-text (live mic transcription)
+ELEVENLABS_API_KEY = os.getenv('ELEVENLABS_API_KEY', '')
+
 # Analytics settings
 ANALYTICS_CACHE_TIMEOUT = 300  # 5 minutes for dashboard cache
 ANALYTICS_ENABLE_AI_INSIGHTS = os.getenv('ANALYTICS_ENABLE_AI_INSIGHTS', 'True').lower() == 'true'
