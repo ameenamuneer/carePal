@@ -2,9 +2,11 @@
 import os
 import re
 import json
+import time
 import logging
 import asyncio
 import base64
+from collections import deque
 import numpy as np
 from channels.generic.websocket import AsyncWebsocketConsumer
 from google import genai
@@ -21,7 +23,6 @@ from patients.models import PatientProfile
 from medications.models import Medication, MedicationAdherence
 from users.models import User
 from agent.models import AgentSession, AgentMessage
-from agent.camera_pan_controller import CameraPanController
 from agent.energy_vad import EnergyEosDetector
 from agent.elevenlabs_stt import transcribe_elevenlabs
 
@@ -48,19 +49,30 @@ MODEL = "models/gemini-2.5-flash-native-audio-preview-12-2025"
 INPUT_RATE = 16000
 
 # Energy VAD tuning (see agent/energy_vad.py). Thresholds are RMS on 0..1.
+# Thresholds are set high enough that the panning servo motors' mechanical noise
+# does not register as speech. Because a higher threshold detects speech onset a
+# little later (only once the talker is clearly above the noise floor), a rolling
+# pre-roll buffer (below) prepends the audio leading up to the trigger so the
+# quiet start of the utterance is never clipped.
 VAD_TICK_MS = 100            # how often check_eos() is polled (wall clock)
-VAD_ENERGY_THRESHOLD = 0.012  # frame RMS above this counts as speech
-VAD_MIN_SPEECH_MS = 200      # min cumulative speech before EOS can fire
+VAD_ENERGY_THRESHOLD = 0.030  # frame RMS above this counts as speech
+VAD_MIN_SPEECH_MS = 300      # min cumulative speech before EOS can fire
 VAD_SILENCE_MS = 700         # trailing real-time silence that ends an utterance
 
-# Barge-in: while the AI is speaking we watch the mic with a SEPARATE, less
+# Rolling pre-roll: keep this much of the most recent mic audio at all times so
+# that when a speech / barge-in trigger fires (possibly late, due to the raised
+# threshold) we can prepend the lead-in and not miss the utterance onset.
+VAD_PREROLL_MS = 1000
+
+# Barge-in: while the AI is speaking we watch the mic with a SEPARATE, even less
 # sensitive detector so the user can interrupt. The threshold is deliberately
-# higher than the normal onset threshold so faint background noise or the echo
-# of the AI's own voice cannot falsely interrupt; a short sustained run is also
-# required. Once confirmed we stop playback, tell Gemini to drop its turn, and
-# start capturing the user's interrupting utterance.
-VAD_BARGE_IN_ENERGY_THRESHOLD = 0.03   # higher than VAD_ENERGY_THRESHOLD (0.012)
-VAD_BARGE_IN_MIN_SPEECH_MS = 300       # sustained loud speech needed to confirm
+# higher than the normal onset threshold so servo noise, faint background chatter
+# or the echo of the AI's own voice cannot falsely interrupt; a longer sustained
+# run is also required. Once confirmed we stop playback, tell Gemini to drop its
+# turn, and start capturing the user's interrupting utterance (seeded from the
+# pre-roll so its beginning is preserved).
+VAD_BARGE_IN_ENERGY_THRESHOLD = 0.060  # higher than VAD_ENERGY_THRESHOLD (0.030)
+VAD_BARGE_IN_MIN_SPEECH_MS = 400       # sustained loud speech needed to confirm
 
 # ElevenLabs Scribe STT (see agent/elevenlabs_stt.py). Language auto-detected.
 STT_MODEL_ID = "scribe_v2"
@@ -70,9 +82,31 @@ STT_TIMEOUT_MS = 20000
 # can see (vision macro). Audio is never sent; only frames + injected text.
 SEND_FRAMES_TO_GEMINI = False
 
-# When True, the autonomous camera-pan controller runs and incoming frames are
-# processed on the backend (YOLO tracking, look-around, hardware pan commands).
-ENABLE_CAMERA_PANNING = False
+# ── Edge-tracking (on-device detection) ───────────────────────────────────────
+# When True, the native app runs on-device detection and streams normalized
+# horizontal offsets ({"type":"track_offset"}). The backend converts those into
+# proportional pan deltas and forwards them to the hardware group. No JPEG is
+# needed for tracking on this path.
+ENABLE_EDGE_TRACKING = True
+
+# These are pushed to the client on connect as a {"type":"config"} message and
+# initialize the client's two independent capture rates. "for now" they are
+# module constants; move to Django settings / per-user config later.
+LIVE_DETECTION_FPS   = 6     # on-device detection + offset send rate (Hz)
+LIVE_GEMINI_FRAME_FPS = 0    # JPEG frames sent to Gemini for vision (0 = off)
+
+# Proportional tracking params (backend-owned; adjustable live via _push_config).
+# offset is the target's horizontal displacement from frame centre, normalized
+# to [-1, 1] (negative = subject left of centre, positive = right).
+TRACK_DEADZONE          = 0.12   # |offset| below this = centred, no pan
+TRACK_PAN_GAIN          = 28.0   # degrees per unit offset (proportional Kp).
+                                 # Kept below the ~30° half-FOV so each step
+                                 # under-shoots and converges without oscillating.
+TRACK_MIN_STEP          = 1      # smallest non-zero correction (degrees)
+TRACK_MAX_STEP          = 25     # clamp on a single correction (degrees); stays
+                                 # under half-FOV so no single step crosses centre
+TRACK_COOLDOWN_MS       = 250    # min gap between consecutive pan commands
+TRACK_MIN_CONF          = 0.50   # ignore detections below this confidence
 
 class GeminiLiveConsumer(AsyncWebsocketConsumer):
     async def connect(self):
@@ -91,6 +125,11 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         # ── Voice pipeline state ─────────────────────────────────────────────
         # Mic frames (int16 numpy arrays) buffered for the current utterance.
         self._mic_buf = []
+        # Rolling pre-roll of the most recent mic frames (~VAD_PREROLL_MS), kept
+        # updated on every frame so a late trigger can prepend the lead-in.
+        self._preroll = deque()
+        self._preroll_samples = 0
+        self._preroll_max = int(INPUT_RATE * VAD_PREROLL_MS / 1000)
         # Energy VAD detector for the current listening window (None = closed).
         self._eos = None
         # Is a listening window currently open (model finished speaking)?
@@ -114,15 +153,23 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         # Long-lived wall-clock VAD poller (started once, cancelled on disconnect).
         self._vad_ticker_task = asyncio.create_task(self._vad_ticker())
 
-        # Initialise the camera pan controller
-        if ENABLE_CAMERA_PANNING:
-            self.pan_controller = CameraPanController(
-                user_id=getattr(self.user, 'id', None),
-                channel_layer=self.channel_layer,
-            )
-            self.pan_controller.start()
-        else:
-            logger.info("Camera panning disabled (ENABLE_CAMERA_PANNING=False); pan controller not started.")
+        # ── Edge-tracking state (on-device detection → proportional pan) ─────
+        # Live-adjustable tracking params. Change these and call _push_config()
+        # to retune the client's capture rates or the backend's pan math midcall.
+        self._track_cfg = {
+            "detection_fps":   LIVE_DETECTION_FPS,
+            "gemini_frame_fps": LIVE_GEMINI_FRAME_FPS,
+            "deadzone":        TRACK_DEADZONE,
+            "pan_gain":        TRACK_PAN_GAIN,
+            "min_step":        TRACK_MIN_STEP,
+            "max_step":        TRACK_MAX_STEP,
+            "cooldown_ms":     TRACK_COOLDOWN_MS,
+            "min_conf":        TRACK_MIN_CONF,
+        }
+        self._last_edge_pan_ms = 0.0
+        # Pushed to the client so it can initialize its two capture timers +
+        # detection filtering. Only the subset the client needs is sent.
+        await self._push_config()
 
         self.patient = await self._load_patient()
         self.task = asyncio.create_task(self.run_gemini_session())
@@ -332,8 +379,6 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                 await self._vad_ticker_task
             except asyncio.CancelledError:
                 pass
-        if hasattr(self, 'pan_controller'):
-            self.pan_controller.stop()
         if hasattr(self, 'task'):
             self.task.cancel()
             try:
@@ -344,15 +389,34 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
 
     # ── Voice pipeline: listening window, VAD ticker, transcribe + inject ─────
 
-    def _begin_window(self):
-        """Open a fresh listening window and start a new energy-VAD detector."""
-        self._mic_buf = []
+    def _push_preroll(self, frame):
+        """Append a mic frame to the rolling pre-roll, trimming to VAD_PREROLL_MS."""
+        self._preroll.append(frame)
+        self._preroll_samples += frame.size
+        while self._preroll_samples > self._preroll_max and len(self._preroll) > 1:
+            old = self._preroll.popleft()
+            self._preroll_samples -= old.size
+
+    def _begin_window(self, seed_preroll=False):
+        """
+        Open a fresh listening window and start a new energy-VAD detector.
+
+        When `seed_preroll` is True (barge-in), the current pre-roll is prepended
+        to the utterance buffer and fed to the detector so the onset of speech
+        that occurred before the trigger is not lost.
+        """
         self._eos = EnergyEosDetector(
             rate=INPUT_RATE,
             energy_threshold=VAD_ENERGY_THRESHOLD,
             min_speech_ms=VAD_MIN_SPEECH_MS,
             silence_ms=VAD_SILENCE_MS,
         )
+        if seed_preroll and self._preroll:
+            self._mic_buf = list(self._preroll)
+            for f in self._mic_buf:
+                self._eos.push_audio(f)
+        else:
+            self._mic_buf = []
         self._window_active = True
         logger.info("Listening window OPEN (awaiting user speech).")
 
@@ -387,8 +451,9 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
             await self.send(bytes_data=bytes([0x03]))
         except Exception as e:
             logger.error(f"Barge-in: failed to send interrupt to client: {e}")
-        # Begin capturing the user's interrupting speech.
-        self._begin_window()
+        # Begin capturing the user's interrupting speech, seeded from the pre-roll
+        # so the onset (which happened before the trigger fired) is preserved.
+        self._begin_window(seed_preroll=True)
 
     async def _vad_ticker(self):
         """
@@ -500,6 +565,10 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                     if frame.size == 0:
                         return
 
+                    # Always keep the rolling pre-roll up to date (used to recover
+                    # the onset when a trigger fires late).
+                    self._push_preroll(frame)
+
                     # While the AI is speaking, watch for a barge-in with the
                     # less-sensitive detector; everything else is ignored.
                     if self.ai_is_speaking:
@@ -521,12 +590,6 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                     b64_image = base64.b64encode(payload_data).decode('utf-8')
                     # Store latest frame for manual-override inference
                     self.latest_frame_b64 = b64_image
-                    # Feed raw bytes to the autonomous pan controller
-                    pan_on = ENABLE_CAMERA_PANNING and hasattr(self, 'pan_controller')
-                    print(f"[FRAME] 0x01 received | payload={len(payload_data)}B | panning={pan_on} | to_gemini={SEND_FRAMES_TO_GEMINI}", flush=True)
-                    if pan_on:
-                        self.pan_controller.process_frame(payload_data)
-                        print(f"[FRAME] process_frame called, _latest_frame is now set={self.pan_controller._latest_frame is not None}", flush=True)
                     if SEND_FRAMES_TO_GEMINI:
                         await self.input_queue.put({
                             "mime_type": "image/jpeg",
@@ -537,6 +600,8 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                     data = json.loads(payload_data.decode('utf-8'))
                     if data.get("type") == "text":
                         await self.input_queue.put({"text": data.get("content") or data.get("data")})
+                    elif data.get("type") == "track_offset":
+                        await self._handle_track_offset(data)
                 
                 return
 
@@ -1102,6 +1167,65 @@ Recent conversation history:
         except Exception as e:
             logger.error(f"Error in sender loop: {e}", exc_info=True)
 
+    async def _push_config(self):
+        """Send current capture/tracking config to the client as a 0x02 JSON message.
+
+        Called on connect and any time params change so the client can retune its
+        two independent capture timers and detection filtering without a reconnect.
+        """
+        cfg = self._track_cfg
+        msg = {
+            "type": "config",
+            "detection_fps":    cfg["detection_fps"],
+            "gemini_frame_fps": cfg["gemini_frame_fps"],
+            "min_conf":         cfg["min_conf"],
+            "edge_tracking":    ENABLE_EDGE_TRACKING,
+        }
+        try:
+            await self.send(bytes_data=b"\x02" + json.dumps(msg).encode("utf-8"))
+            logger.info(f"[edge] pushed config → client: {msg}")
+        except Exception as exc:
+            logger.error(f"[edge] failed to push config: {exc}")
+
+    async def _handle_track_offset(self, data: dict):
+        """Convert an on-device detection offset into a proportional pan delta.
+
+        Expects {"type":"track_offset", "dx": <float -1..1>, "conf": <float>,
+        "found": <bool>}. dx < 0 → subject left of centre, dx > 0 → right.
+        Sign convention matches the legacy YOLO controller (subject-left → negative
+        delta). Corrections ramp proportionally from min_step at the edge of the
+        deadzone up to max_step near the frame edge.
+        """
+        if not ENABLE_EDGE_TRACKING:
+            return
+        cfg = self._track_cfg
+        now_ms = time.monotonic() * 1000.0
+
+        if not bool(data.get("found", True)):
+            return
+        try:
+            conf = float(data.get("conf", 1.0))
+            dx = float(data.get("dx", 0.0))
+        except (TypeError, ValueError):
+            return
+        if conf < cfg["min_conf"]:
+            return
+
+        dx = max(-1.0, min(1.0, dx))
+        if abs(dx) < cfg["deadzone"]:
+            return   # subject sufficiently centred
+
+        if now_ms - self._last_edge_pan_ms < cfg["cooldown_ms"]:
+            return   # respect inter-command cooldown
+
+        over = abs(dx) - cfg["deadzone"]
+        magnitude = cfg["pan_gain"] * over
+        magnitude = max(cfg["min_step"], min(cfg["max_step"], magnitude))
+        delta = int(round(magnitude)) * (1 if dx > 0 else -1)
+
+        self._last_edge_pan_ms = now_ms
+        await self._send_hardware_pan(delta)
+
     async def _send_hardware_pan(self, delta: int):
         """Send a raw delta pan command directly to the hardware channel group."""
         if not (hasattr(self, 'channel_layer') and self.channel_layer and self.user and self.user.id):
@@ -1123,23 +1247,16 @@ Recent conversation history:
 
     async def handle_adjust_camera(self, command: str, fc_id):
         """
-        Manual-override entry point called when the Live AI invokes 'adjust_camera'.
+        Manual pan entry point called when the Live AI invokes 'adjust_camera'.
 
-        Passes the command + current frame to an orchestrator model which decides:
-          • switch_mode  – change the pan controller to tracking or look_around
-          • pan          – send an immediate delta pan and enter manual_override for 30s
-
-        After 30 seconds the pan controller automatically reverts to tracking.
+        Passes the command + current frame to an orchestrator model which returns
+        a one-off pan delta. Autonomous subject tracking runs on the phone (edge
+        ML Kit → track_offset); this tool is only for explicit manual pans.
         """
         logger.info(f"[adjust_camera] START | command='{command}' | fc_id={fc_id}")
         result_msg = "Command executed."
 
         try:
-            if not ENABLE_CAMERA_PANNING:
-                result_msg = "Camera panning is disabled; no action taken."
-                logger.info("[adjust_camera] Skipped — ENABLE_CAMERA_PANNING is False.")
-                return  # finally still sends the tool response
-
             api_key = os.environ.get("GOOGLE_API_KEY") or getattr(settings, "GOOGLE_API_KEY", None)
             client = genai.Client(
                 api_key=api_key,
@@ -1150,27 +1267,17 @@ Recent conversation history:
             # version mismatches with the systemInstruction field.
             orchestrator_system = """You are the CarePal camera-control orchestrator.
 The live AI assistant has sent a plain-English command about the camera.
-The camera system has three modes:
-  - "tracking"        : computer-vision face/body tracking (default)
-  - "look_around"     : slow left/right sweep searching for a person
-  - "manual_override" : a one-off pan command; tracking resumes after 30 s
+Autonomous face/body tracking already runs continuously; your only job is to
+translate an explicit manual-pan request into a one-off pan delta.
 
-Given the command (and the current camera frame when available), choose the
-best action and return ONLY a JSON object – no markdown, no extra text.
+Given the command (and the current camera frame when available), return ONLY a
+JSON object – no markdown, no extra text:
 
-Possible response shapes:
-
-  Switch mode:
-    {"action": "switch_mode", "mode": "tracking"}
-    {"action": "switch_mode", "mode": "look_around"}
-
-  Immediate pan (also activates manual_override for 30 s):
-    {"action": "pan", "delta": <INT>}
+  {"action": "pan", "delta": <INT>}
     Positive delta = pan right. Negative delta = pan left. Range ±10 … ±60.
+    Use delta 0 if no pan movement is required.
 
 Decision guide:
-  "look around / find patient / patient not visible"        → switch_mode look_around
-  "switch to face tracking / start tracking"               → switch_mode tracking
   "turn left / pan left / move left [slightly/a lot]"      → pan -15 … -40
   "turn right / pan right / move right [slightly/a lot]"   → pan +15 … +40
   "track person on the left"                               → pan -20
@@ -1213,23 +1320,13 @@ Respond with ONLY the JSON object, nothing else."""
             logger.info(f"[adjust_camera] Orchestrator response: {response_text}")
             action = json.loads(response_text)
 
-            controller = getattr(self, 'pan_controller', None)
             act = action.get('action')
 
-            if act == 'switch_mode':
-                mode = action.get('mode', 'tracking')
-                if controller:
-                    controller.set_mode(mode)
-                result_msg = f"Switched camera to '{mode}' mode."
-                logger.info(f"[adjust_camera] Mode switched to '{mode}'")
-
-            elif act == 'pan':
+            if act == 'pan':
                 delta = int(action.get('delta', 0))
                 if delta != 0:
-                    if controller:
-                        controller.enter_manual_override()
                     await self._send_hardware_pan(delta)
-                    result_msg = f"Panned camera by {delta}° (manual override active for 30 s)."
+                    result_msg = f"Panned camera by {delta}°."
                 else:
                     result_msg = "No pan movement required."
                 logger.info(f"[adjust_camera] Panned delta={delta}")

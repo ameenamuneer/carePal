@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Platform;
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' show ImageFilter;
@@ -8,6 +9,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
+import 'package:google_mlkit_commons/google_mlkit_commons.dart';
+import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
+import 'package:google_mlkit_object_detection/google_mlkit_object_detection.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/io.dart';
@@ -15,7 +19,6 @@ import 'package:flutter_pcm_sound/flutter_pcm_sound.dart';
 import 'package:image/image.dart' as img;
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../services/api_service.dart';
-import '../services/ble_servo_service.dart';
 import '../services/aec_recorder.dart';
 
 class GeminiLiveScreen extends StatefulWidget {
@@ -40,13 +43,26 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
   bool _micOn = true;
   Timer? _speakingTimer;
 
-  // --- Camera ---
+  // --- Camera / edge tracking ---
   CameraController? _cameraController;
-  final BleServoService _bleServoService = BleServoService();
-  DateTime _lastFrameTime = DateTime.now();
-  final Duration _frameInterval = const Duration(milliseconds: 1500);
-  bool _isProcessingFrame = false;
   bool _camVisible = false;
+
+  // On-device detectors: faces are the primary tracking target; object
+  // detection is the fallback when no face is present.
+  FaceDetector? _faceDetector;
+  ObjectDetector? _objectDetector;
+
+  // Two INDEPENDENT, backend-configurable capture rates. Seeded here and
+  // overwritten by the backend's {"type":"config"} message on connect.
+  int _detectionFps = 6;      // on-device detection + track_offset send (Hz)
+  int _geminiFrameFps = 0;    // JPEG frames sent to Gemini for vision (0 = off)
+  double _minConf = 0.5;      // confidence filter (object fallback only)
+  bool _edgeTracking = true;
+
+  DateTime _lastDetect = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastGeminiFrame = DateTime.fromMillisecondsSinceEpoch(0);
+  bool _isDetecting = false;      // guards one detection at a time
+  bool _isEncodingFrame = false;  // guards one JPEG encode at a time
 
   // --- Animation ---
   late Ticker _ticker;
@@ -68,6 +84,16 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
   void initState() {
     super.initState();
     WakelockPlus.enable();
+    _faceDetector = FaceDetector(
+      options: FaceDetectorOptions(performanceMode: FaceDetectorMode.fast),
+    );
+    _objectDetector = ObjectDetector(
+      options: ObjectDetectorOptions(
+        mode: DetectionMode.stream,
+        classifyObjects: false,
+        multipleObjects: true,
+      ),
+    );
     _ticker = createTicker(_onTick)..start();
     _initialize();
   }
@@ -216,9 +242,7 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
     } else if (typeByte == 0x02) {
       final data = jsonDecode(utf8.decode(message.sublist(1)));
       if (data['type'] == 'interrupted') _interruptAudio();
-      if (data['type'] == 'camera_control') {
-        _bleServoService.setDelta(data['pan_delta'].toString());
-      }
+      if (data['type'] == 'config') _applyConfig(data);
       if (data['type'] == 'text') {
         if (mounted) setState(() {
           _tickerText = data['content'] ?? '';
@@ -265,10 +289,13 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
       _cameraController = CameraController(
         front, ResolutionPreset.medium,
         enableAudio: false,
-        imageFormatGroup: ImageFormatGroup.yuv420,
+        // NV21 (Android) / BGRA8888 (iOS) are the single-plane formats ML Kit
+        // consumes directly, so detection runs zero-copy on the hot path.
+        imageFormatGroup:
+            Platform.isAndroid ? ImageFormatGroup.nv21 : ImageFormatGroup.bgra8888,
       );
       await _cameraController!.initialize();
-      _cameraController!.startImageStream(_processCameraFrame);
+      _cameraController!.startImageStream(_onCameraImage);
       if (mounted) setState(() {});
     } catch (e) {
       debugPrint('Camera init error: $e');
@@ -305,21 +332,123 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
     }
   }
 
-  Future<void> _processCameraFrame(CameraImage image) async {
-    if (_isProcessingFrame || !_isConnected || _isDisposed) return;
+  // Applies a live config push from the backend. Both capture rates and the
+  // detection confidence filter can change mid-session without a reconnect.
+  void _applyConfig(Map<String, dynamic> data) {
+    _detectionFps = (data['detection_fps'] ?? _detectionFps as num).toInt();
+    _geminiFrameFps = (data['gemini_frame_fps'] ?? _geminiFrameFps as num).toInt();
+    _minConf = (data['min_conf'] ?? _minConf as num).toDouble();
+    _edgeTracking = (data['edge_tracking'] ?? _edgeTracking) as bool;
+    debugPrint('[edge] config: detFps=$_detectionFps gemFps=$_geminiFrameFps '
+        'minConf=$_minConf edge=$_edgeTracking');
+    if (mounted) setState(() {});
+  }
+
+  // Single camera stream feeds two INDEPENDENT rate-gated consumers:
+  //   • edge detection  → track_offset (runs at _detectionFps)
+  //   • Gemini vision    → JPEG frame   (runs at _geminiFrameFps, 0 = off)
+  void _onCameraImage(CameraImage image) {
+    if (_isDisposed || !_isConnected) return;
     final now = DateTime.now();
-    if (now.difference(_lastFrameTime) < _frameInterval) return;
-    _isProcessingFrame = true;
-    _lastFrameTime = now;
+
+    if (_edgeTracking &&
+        _detectionFps > 0 &&
+        !_isDetecting &&
+        now.difference(_lastDetect).inMilliseconds >= 1000 ~/ _detectionFps) {
+      _lastDetect = now;
+      _runDetection(image);
+    }
+
+    if (_geminiFrameFps > 0 &&
+        !_isEncodingFrame &&
+        now.difference(_lastGeminiFrame).inMilliseconds >= 1000 ~/ _geminiFrameFps) {
+      _lastGeminiFrame = now;
+      _sendGeminiFrame(image);
+    }
+  }
+
+  // Runs ML Kit on the frame, picks the largest face (or largest object as a
+  // fallback), and sends its normalized horizontal offset to the backend, which
+  // owns the proportional pan math.
+  Future<void> _runDetection(CameraImage image) async {
+    _isDetecting = true;
     try {
-      final req = YuvConvertRequest(
-        planes: image.planes.map((p) => p.bytes).toList(),
-        strides: image.planes.map((p) => p.bytesPerRow).toList(),
+      final input = _inputImageFromCameraImage(image);
+      if (input == null) return;
+
+      // Upright width: when the frame is rotated 90/270 to portrait, the
+      // horizontal axis maps to the sensor's height. This matches the basis the
+      // legacy YOLO path used (it panned on cx over the upright-image width).
+      final rot = _computeImageRotation();
+      final uprightWidth =
+          (rot == 90 || rot == 270) ? image.height.toDouble() : image.width.toDouble();
+
+      Rect? box;
+      double conf = 1.0; // face detector has no score; treat as fully confident
+
+      final faces = await _faceDetector!.processImage(input);
+      if (faces.isNotEmpty) {
+        box = faces
+            .map((f) => f.boundingBox)
+            .reduce((a, b) => a.width * a.height >= b.width * b.height ? a : b);
+      } else {
+        final objects = await _objectDetector!.processImage(input);
+        if (objects.isNotEmpty) {
+          final obj = objects.reduce((a, b) =>
+              a.boundingBox.width * a.boundingBox.height >=
+                      b.boundingBox.width * b.boundingBox.height
+                  ? a
+                  : b);
+          box = obj.boundingBox;
+          conf = obj.labels.isNotEmpty ? obj.labels.first.confidence : 0.6;
+        }
+      }
+
+      if (box == null || uprightWidth <= 0) {
+        _sendTrackOffset(found: false);
+        return;
+      }
+      // dx in [-1, 1]: negative = subject left of centre, positive = right.
+      // NOTE: the exact axis/sign must be verified against the physical servo on
+      // device; flip the sign here if the camera pans away from the subject.
+      final dx = ((box.center.dx / uprightWidth) - 0.5) * 2.0;
+      _sendTrackOffset(dx: dx.clamp(-1.0, 1.0), conf: conf, found: true);
+    } catch (e) {
+      debugPrint('Detection error: $e');
+    } finally {
+      _isDetecting = false;
+    }
+  }
+
+  void _sendTrackOffset({double dx = 0, double conf = 1.0, bool found = true}) {
+    if (_channel == null || !_isConnected || _isDisposed) return;
+    if (conf < _minConf) found = false;
+    final body = utf8.encode(jsonEncode({
+      'type': 'track_offset',
+      'dx': double.parse(dx.toStringAsFixed(4)),
+      'conf': conf,
+      'found': found,
+    }));
+    final payload = Uint8List(body.length + 1);
+    payload[0] = 0x02;
+    payload.setRange(1, payload.length, body);
+    _channel!.sink.add(payload);
+  }
+
+  // Optional vision path: encode the frame to JPEG and forward for Gemini.
+  // Off by default (_geminiFrameFps = 0). NV21 encoder is Android-only for now.
+  Future<void> _sendGeminiFrame(CameraImage image) async {
+    _isEncodingFrame = true;
+    try {
+      if (!Platform.isAndroid) return;
+      final req = Nv21ConvertRequest(
+        bytes: image.planes.first.bytes,
         width: image.width,
         height: image.height,
+        rowStride: image.planes.first.bytesPerRow,
         rotation: _computeImageRotation(),
       );
-      final jpeg = await compute(convertYUV420toJPEG, req);
+      final jpeg = await compute(convertNv21toJPEG, req);
       if (jpeg != null && !_isDisposed && _channel != null) {
         final payload = Uint8List(jpeg.length + 1);
         payload[0] = 0x01;
@@ -327,10 +456,27 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
         _channel!.sink.add(payload);
       }
     } catch (e) {
-      debugPrint('Frame error: $e');
+      debugPrint('Gemini frame error: $e');
     } finally {
-      _isProcessingFrame = false;
+      _isEncodingFrame = false;
     }
+  }
+
+  InputImage? _inputImageFromCameraImage(CameraImage image) {
+    final rotation = InputImageRotationValue.fromRawValue(_computeImageRotation());
+    if (rotation == null) return null;
+    final format = InputImageFormatValue.fromRawValue(image.format.raw);
+    if (format == null || image.planes.isEmpty) return null;
+    final plane = image.planes.first;
+    return InputImage.fromBytes(
+      bytes: plane.bytes,
+      metadata: InputImageMetadata(
+        size: Size(image.width.toDouble(), image.height.toDouble()),
+        rotation: rotation,
+        format: format,
+        bytesPerRow: plane.bytesPerRow,
+      ),
+    );
   }
 
   void _toggleMic() => setState(() {
@@ -351,6 +497,8 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
     _aecRecorder.dispose();
     FlutterPcmSound.release();
     _cameraController?.dispose();
+    _faceDetector?.close();
+    _objectDetector?.close();
     _channel?.sink.close(1000);
     super.dispose();
   }
@@ -825,50 +973,50 @@ class _ControlButton extends StatelessWidget {
   }
 }
 
-// ── YUV → JPEG helpers (unchanged) ──────────────────────────────────────────
+// ── NV21 → JPEG helper (optional Gemini vision path, Android) ────────────────
+//
+// The camera stream is NV21 (single plane: full-res Y, then interleaved V/U at
+// quarter resolution). Runs in an isolate via compute(); downsamples ÷2.
 
-class YuvConvertRequest {
-  final List<Uint8List> planes;
-  final List<int> strides;
+class Nv21ConvertRequest {
+  final Uint8List bytes;
   final int width;
   final int height;
-  final int rotation; // clockwise degrees to apply before encoding
-  YuvConvertRequest({
-    required this.planes,
-    required this.strides,
+  final int rowStride;   // Y row stride (usually == width, may be padded)
+  final int rotation;    // clockwise degrees to apply before encoding
+  Nv21ConvertRequest({
+    required this.bytes,
     required this.width,
     required this.height,
+    required this.rowStride,
     this.rotation = 0,
   });
 }
 
-Uint8List? convertYUV420toJPEG(YuvConvertRequest req) {
+Uint8List? convertNv21toJPEG(Nv21ConvertRequest req) {
   try {
     const int step = 2;
     final int newWidth = req.width ~/ step;
     final int newHeight = req.height ~/ step;
     var image = img.Image(width: newWidth, height: newHeight);
 
-    final yPlane = req.planes[0];
-    final uPlane = req.planes[1];
-    final vPlane = req.planes[2];
-    final yStride = req.strides[0];
-    final uvPixelStride =
-        req.planes[1].length > (req.width * req.height / 4) ? 2 : 1;
+    final bytes = req.bytes;
+    final int yStride = req.rowStride;
+    final int uvStart = yStride * req.height; // V/U interleaved region start
 
     for (int y = 0; y < newHeight; y++) {
       for (int x = 0; x < newWidth; x++) {
         final int origX = x * step;
         final int origY = y * step;
         final int yIndex = origY * yStride + origX;
-        final int index =
-            (origY ~/ 2) * req.strides[1] + (origX ~/ 2) * uvPixelStride;
+        // NV21 chroma is subsampled 2×2 and stored V,U per pair.
+        final int uvIndex =
+            uvStart + (origY ~/ 2) * yStride + (origX ~/ 2) * 2;
+        if (yIndex >= bytes.length || uvIndex + 1 >= bytes.length) continue;
 
-        if (yIndex >= yPlane.length || index >= uPlane.length) continue;
-
-        final yp = yPlane[yIndex];
-        final up = uPlane[index];
-        final vp = vPlane[index];
+        final yp = bytes[yIndex];
+        final vp = bytes[uvIndex];
+        final up = bytes[uvIndex + 1];
 
         final r = (yp + (1.370705 * (vp - 128))).round().clamp(0, 255);
         final g = (yp - (0.337633 * (up - 128)) - (0.698001 * (vp - 128)))
