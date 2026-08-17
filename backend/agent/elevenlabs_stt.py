@@ -58,10 +58,16 @@ def transcribe_elevenlabs(
     model_id: str = "scribe_v2",
     timeout: float = 20.0,
     api_key: Optional[str] = None,
+    tag_audio_events: bool = True,
 ) -> str:
     """
     Transcribe a finished utterance. Blocking (uses `requests`); call via
     asyncio.to_thread from async code. Returns the transcript text (may be '').
+
+    `tag_audio_events` (default True) controls whether Scribe annotates
+    non-speech events like "[Background noise]". Set it False when the transcript
+    is used only to decide whether real speech is present (e.g. barge-in gating),
+    so noise yields an empty string instead of a bracket tag.
     """
     key = api_key or get_elevenlabs_key()
     if not key:
@@ -71,7 +77,10 @@ def transcribe_elevenlabs(
 
     wav = pcm16_to_wav_bytes(int16, rate)
     # Automatic language detection = do NOT send language_code.
-    data = {"model_id": model_id}
+    data = {
+        "model_id": model_id,
+        "tag_audio_events": "true" if tag_audio_events else "false",
+    }
     files = {"file": ("audio.wav", wav, "audio/wav")}
 
     # Do NOT set Content-Type manually — requests sets the multipart boundary.

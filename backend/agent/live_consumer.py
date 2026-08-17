@@ -74,6 +74,15 @@ VAD_PREROLL_MS = 1000
 VAD_BARGE_IN_ENERGY_THRESHOLD = 0.060  # higher than VAD_ENERGY_THRESHOLD (0.030)
 VAD_BARGE_IN_MIN_SPEECH_MS = 400       # sustained loud speech needed to confirm
 
+# Energy alone cannot separate servo motor noise from real speech, so a positive
+# energy trigger during AI playback is only a CANDIDATE: we snapshot ~1s of audio
+# (the pre-roll) and transcribe it with tag_audio_events=False. Only if real
+# words come back do we actually interrupt. That verification transcript is used
+# solely for the interrupt decision and is never sent to Gemini. The cooldown
+# stops us from firing a fresh verification on every tick while one is pending or
+# right after a rejected candidate.
+VAD_BARGE_IN_COOLDOWN_MS = 1200
+
 # ElevenLabs Scribe STT (see agent/elevenlabs_stt.py). Language auto-detected.
 STT_MODEL_ID = "scribe_v2"
 STT_TIMEOUT_MS = 20000
@@ -138,6 +147,12 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         self._transcribing = False
         # Barge-in detector, active only while the AI is speaking (None = idle).
         self._barge_in = None
+        # True while a barge-in verification transcription is in flight, so the
+        # ticker/receiver don't spawn a second one for the same noise burst.
+        self._barge_in_checking = False
+        # monotonic() timestamp before which no new barge-in verification fires
+        # (set after a rejected candidate to avoid hammering STT on motor noise).
+        self._barge_in_cooldown_until = 0.0
         # After a barge-in we discard the interrupted turn's trailing audio until
         # the next turn_complete / new injected turn takes over.
         self._suppress_ai_audio = False
@@ -455,6 +470,61 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         # so the onset (which happened before the trigger fired) is preserved.
         self._begin_window(seed_preroll=True)
 
+    def _rearm_barge_in(self):
+        """Re-arm (or clear) the barge-in detector after a rejected candidate."""
+        if self.ai_is_speaking:
+            self._start_barge_in_detector()
+        else:
+            self._barge_in = None
+
+    async def _verify_barge_in(self, audio: np.ndarray):
+        """
+        Confirm a candidate barge-in with STT before interrupting.
+
+        `audio` is a ~1s snapshot of the most recent mic pre-roll captured when
+        the energy detector tripped during AI playback. We transcribe it with
+        tag_audio_events=False (so non-speech events don't produce bracket tags)
+        and only trigger the interrupt if real words come back. This transcript
+        is used solely for the interrupt decision — it is NEVER sent to Gemini.
+        """
+        try:
+            if audio is None or audio.size == 0 or not self._elevenlabs_key:
+                self._rearm_barge_in()
+                return
+            try:
+                text = await asyncio.to_thread(
+                    transcribe_elevenlabs,
+                    audio,
+                    INPUT_RATE,
+                    STT_MODEL_ID,
+                    STT_TIMEOUT_MS / 1000.0,
+                    self._elevenlabs_key,
+                    False,  # tag_audio_events — suppress non-speech tags
+                )
+            except Exception as e:
+                logger.error(f"Barge-in verification STT failed: {e}")
+                self._barge_in_cooldown_until = time.monotonic() + (
+                    VAD_BARGE_IN_COOLDOWN_MS / 1000.0
+                )
+                self._rearm_barge_in()
+                return
+
+            # Strip any stray brackets/parens defensively; keep only real words.
+            lexical = re.sub(r"\[[^\]]*\]|\([^\)]*\)", "", text or "").strip()
+            if lexical and self.ai_is_speaking:
+                logger.info(f"Barge-in verified by STT: {lexical[:60]!r}")
+                await self._handle_barge_in()
+            else:
+                logger.info(
+                    "Barge-in candidate rejected (no real speech in snapshot)."
+                )
+                self._barge_in_cooldown_until = time.monotonic() + (
+                    VAD_BARGE_IN_COOLDOWN_MS / 1000.0
+                )
+                self._rearm_barge_in()
+        finally:
+            self._barge_in_checking = False
+
     async def _vad_ticker(self):
         """
         Long-lived wall-clock poller. Every VAD_TICK_MS it asks the current
@@ -569,13 +639,31 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                     # the onset when a trigger fires late).
                     self._push_preroll(frame)
 
-                    # While the AI is speaking, watch for a barge-in with the
-                    # less-sensitive detector; everything else is ignored.
+                    # While the AI is speaking, watch for a barge-in. The energy
+                    # detector is only a cheap CANDIDATE trigger — servo/motor
+                    # noise can trip it — so when it fires we snapshot ~1s of
+                    # pre-roll and hand it to STT verification, which decides
+                    # whether real speech is present before actually interrupting.
                     if self.ai_is_speaking:
-                        if self._barge_in is not None:
+                        if (
+                            self._barge_in is not None
+                            and not self._barge_in_checking
+                            and time.monotonic() >= self._barge_in_cooldown_until
+                        ):
                             self._barge_in.push_audio(frame)
                             if self._barge_in.saw_speech:
-                                await self._handle_barge_in()
+                                self._barge_in_checking = True
+                                snapshot = (
+                                    np.concatenate(list(self._preroll))
+                                    if self._preroll
+                                    else np.array([], dtype=np.int16)
+                                )
+                                # Disarm the energy detector while STT runs; it is
+                                # re-armed (or the interrupt fires) in _verify.
+                                self._barge_in = None
+                                asyncio.create_task(
+                                    self._verify_barge_in(snapshot)
+                                )
                         return
 
                     # Normal listening: buffer the utterance and feed the energy
@@ -907,6 +995,8 @@ Recent conversation history:
                     # every turn_complete thereafter.
                     self.ai_is_speaking = False
                     self._barge_in = None
+                    self._barge_in_checking = False
+                    self._barge_in_cooldown_until = 0.0
                     self._suppress_ai_audio = False
                     self._begin_window()
                     logger.info("Connected to Gemini Live")
