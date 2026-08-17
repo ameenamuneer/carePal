@@ -11,6 +11,7 @@ import numpy as np
 from channels.generic.websocket import AsyncWebsocketConsumer
 from google import genai
 from google.genai import types
+from google.genai import errors as genai_errors
 from django.conf import settings
 from django.utils import timezone
 from datetime import timedelta
@@ -433,7 +434,7 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         else:
             self._mic_buf = []
         self._window_active = True
-        logger.info("Listening window OPEN (awaiting user speech).")
+        logger.debug("Listening window OPEN (awaiting user speech).")
 
     def _close_window(self):
         """Close the listening window and drop any buffered mic audio."""
@@ -469,6 +470,29 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         # Begin capturing the user's interrupting speech, seeded from the pre-roll
         # so the onset (which happened before the trigger fired) is preserved.
         self._begin_window(seed_preroll=True)
+
+    @staticmethod
+    def _is_transient_disconnect(exc: BaseException) -> bool:
+        """
+        True if the exception is an expected/handled Gemini Live socket drop
+        (server-side 1011 internal error, idle close, network blip) rather than
+        a real bug in our code. These are recoverable by reconnecting, so we log
+        them as clean warnings instead of dumping a full traceback.
+        """
+        # SDK surfaces server closes as APIError with a WebSocket close code.
+        if isinstance(exc, genai_errors.APIError):
+            code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+            if code in (1011, 1006, 1001, 1000, 500, 503):
+                return True
+        name = type(exc).__name__
+        if "ConnectionClosed" in name:
+            return True
+        # Fallback: match the close codes / phrasing in the message text.
+        msg = str(exc)
+        return any(
+            tok in msg
+            for tok in ("1011", "1006", "1001", "internal error", "Internal error")
+        )
 
     def _rearm_barge_in(self):
         """Re-arm (or clear) the barge-in detector after a rejected candidate."""
@@ -515,7 +539,7 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                 logger.info(f"Barge-in verified by STT: {lexical[:60]!r}")
                 await self._handle_barge_in()
             else:
-                logger.info(
+                logger.debug(
                     "Barge-in candidate rejected (no real speech in snapshot)."
                 )
                 self._barge_in_cooldown_until = time.monotonic() + (
@@ -764,9 +788,12 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
 
         # 1. Fetch Patient Context
         context = await self.get_patient_context()
-        recent_messages_str = await self.get_recent_messages_context()
-        
-        # 2. Build System Instruction
+
+        # 2. Build System Instruction (base). The "Recent conversation history"
+        # section is appended fresh on every (re)connect below, because Gemini
+        # Live keeps no server-side memory: after a mid-session disconnect the
+        # new session must be re-seeded with the latest turns from the DB or the
+        # conversation context is lost across the reconnect.
         system_instruction = f"""You are CarePAL, a compassionate AI healthcare assistant for home-bound patients.
 
 Context:
@@ -809,7 +836,12 @@ Rules:
 - Considering that the user is in GMT +5:30, check if there are any medications to be taken and whether the last dose was taken when you have a free moment in the conversation.
 
 Activity Logging (IMPORTANT):
-- You MUST silently call 'log_patient_activity' whenever you observe ANY of the following during conversation — without prompting the patient and without mentioning that you are logging:
+- CRITICAL — DO NOT RE-LOG HISTORY: The "Recent conversation history" section below is
+  PAST context that has ALREADY been logged. You must NEVER call 'log_patient_activity'
+  for anything that appears in that history. At the start of a session do NOT emit any
+  activity-log tool calls to "catch up" on the history — those events are already recorded.
+  Only ever log NEW events that the patient states LIVE in the current, ongoing turn.
+- You MUST silently call 'log_patient_activity' whenever you observe ANY of the following live during the current conversation turn — without prompting the patient and without mentioning that you are logging:
   • Patient mentions eating a meal, snack, or any food/drink with calories (activity_type: MEAL)
   • Patient mentions any physical activity or confirms they did/skipped exercise (activity_type: EXERCISE)
   • Patient reports a symptom — pain, dizziness, nausea, shortness of breath, fatigue, etc. (activity_type: SYMPTOM)
@@ -842,9 +874,6 @@ Meal Logging:
 - If the patient mentions how their appetite was, include appetite in details: {{"appetite": "GOOD"}} / {{"appetite": "POOR"}} / {{"appetite": "NORMAL"}}.
 - Do not ask about meals more than once per meal window (morning / afternoon / evening).
 - Do not tell the patient you are logging their meal.
-
-Recent conversation history:
-{recent_messages_str}
 """
 
         # Inject any pending questions from backend agents
@@ -970,21 +999,36 @@ Recent conversation history:
             automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
         )
 
-        config = types.LiveConnectConfig(
-            response_modalities=["AUDIO"],
-            media_resolution="MEDIA_RESOLUTION_MEDIUM",
-            system_instruction=types.Content(parts=[types.Part(text=system_instruction)]),
-            tools=tools, # Pass tool definitions
-            speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Zephyr")
-                )
-            ),
-            realtime_input_config=realtime_input_config,
-        )
+        # Greet only once per connection lifetime (not on every silent reconnect).
+        greeted = False
 
         while not self.stop_event.is_set():
             try:
+                # Re-seed the fresh session with the latest conversation history
+                # from the DB so context carries across reconnects. (Also (re)binds
+                # self.db_session.) On the first connect this is the pre-session
+                # history; on a reconnect it includes everything said this session.
+                recent_messages_str = await self.get_recent_messages_context()
+                session_instruction = (
+                    system_instruction
+                    + "\n\nRecent conversation history (READ-ONLY context, already "
+                    + "logged — do NOT call log_patient_activity for anything here):\n"
+                    + recent_messages_str
+                )
+                config = types.LiveConnectConfig(
+                    response_modalities=["AUDIO"],
+                    media_resolution="MEDIA_RESOLUTION_MEDIUM",
+                    system_instruction=types.Content(
+                        parts=[types.Part(text=session_instruction)]
+                    ),
+                    tools=tools,  # Pass tool definitions
+                    speech_config=types.SpeechConfig(
+                        voice_config=types.VoiceConfig(
+                            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Zephyr")
+                        )
+                    ),
+                    realtime_input_config=realtime_input_config,
+                )
                 async with client.aio.live.connect(model=MODEL, config=config) as session:
                     self.session = session
                     self.current_user_text = ""
@@ -1003,6 +1047,24 @@ Recent conversation history:
                     
                     # Start the sender loop
                     sender_task = asyncio.create_task(self.sender_loop())
+
+                    # On the very first connect, prompt the AI to speak first so
+                    # the patient is greeted instead of facing silence. This is a
+                    # system trigger (not the patient's speech), so it is not
+                    # stored as a user message. Skipped on reconnects to avoid a
+                    # jarring re-greeting mid-conversation.
+                    if not greeted:
+                        greeted = True
+                        await self.input_queue.put({
+                            "text": (
+                                "[SESSION_START] The session just began. Greet the "
+                                "patient warmly and briefly by name, weaving in any "
+                                "relevant context (e.g. a pending medication or a "
+                                "follow-up from recent history) only if natural. "
+                                "Keep it to one or two short sentences. Do NOT log "
+                                "any activity for this greeting."
+                            )
+                        })
 
                     # Receiver loop
                     logger.info("Starting receiver loop")
@@ -1026,7 +1088,7 @@ Recent conversation history:
                                         await self.send(bytes_data=payload)
 
                                 if response.text:
-                                    logger.info(f"[AI_SPEAKING={self.ai_is_speaking}] Received text: {response.text[:50]}...")
+                                    logger.debug(f"[AI_SPEAKING={self.ai_is_speaking}] Received text: {response.text[:50]}...")
                                     self.current_ai_text += response.text
                                     payload = bytes([0x02]) + json.dumps({
                                         "type": "text",
@@ -1044,7 +1106,7 @@ Recent conversation history:
                                         self._barge_in = None
 
                                     if getattr(server_content, 'turn_complete', False):
-                                        logger.info(f"[AI_SPEAKING={self.ai_is_speaking}] Server content: turn_complete=True. Resetting flag.")
+                                        logger.debug(f"[AI_SPEAKING={self.ai_is_speaking}] Server content: turn_complete=True. Resetting flag.")
                                         self.ai_is_speaking = False
                                         self._barge_in = None
                                         # Any barge-in suppression is stale once a
@@ -1090,7 +1152,7 @@ Recent conversation history:
                                     elif fc.name == "log_patient_activity":
                                         asyncio.create_task(self.handle_log_activity(fc_args, fc_id))
                                             
-                            logger.info("Receiver loop finished (turn complete). Re-entering...")
+                            logger.debug("Receiver loop finished (turn complete). Re-entering...")
                             if self.stop_event.is_set():
                                 break
                             
@@ -1098,8 +1160,17 @@ Recent conversation history:
                             await asyncio.sleep(0.05)
 
                     except Exception as inner_e:
-                        logger.error(f"Error inside receiver loop: {inner_e}", exc_info=True)
-                        
+                        if self._is_transient_disconnect(inner_e):
+                            logger.warning(
+                                f"Gemini Live connection dropped ({inner_e}); "
+                                "reconnecting."
+                            )
+                        else:
+                            logger.error(
+                                f"Error inside receiver loop: {inner_e}",
+                                exc_info=True,
+                            )
+
                     sender_task.cancel()
                     try:
                         await sender_task
@@ -1116,10 +1187,15 @@ Recent conversation history:
                 logger.info("Gemini session cancelled")
                 break
             except Exception as e:
-                logger.error(f"Gemini session error: {e}", exc_info=True)
                 if self.stop_event.is_set():
                     break
-                logger.warning("Gemini session crashed, reconnecting in 2s...")
+                if self._is_transient_disconnect(e):
+                    logger.warning(
+                        f"Gemini Live connection dropped ({e}); reconnecting in 2s..."
+                    )
+                else:
+                    logger.error(f"Gemini session error: {e}", exc_info=True)
+                    logger.warning("Gemini session crashed, reconnecting in 2s...")
                 await asyncio.sleep(2)
         
         logger.info("Exiting run_gemini_session")
@@ -1333,7 +1409,7 @@ Recent conversation history:
                 },
             },
         )
-        logger.info(f"[pan] Sent delta={delta} to {group_name}")
+        logger.debug(f"[pan] Sent delta={delta} to {group_name}")
 
     async def handle_adjust_camera(self, command: str, fc_id):
         """
@@ -1419,7 +1495,7 @@ Respond with ONLY the JSON object, nothing else."""
                     result_msg = f"Panned camera by {delta}°."
                 else:
                     result_msg = "No pan movement required."
-                logger.info(f"[adjust_camera] Panned delta={delta}")
+                logger.debug(f"[adjust_camera] Panned delta={delta}")
 
             else:
                 logger.warning(f"[adjust_camera] Unknown orchestrator action: {act}")

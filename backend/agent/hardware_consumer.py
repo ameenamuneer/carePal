@@ -51,7 +51,7 @@ class HardwareConsumer(AsyncWebsocketConsumer):
                 # The hardware sent its current position
                 current_position = data.get('current_position')
                 status = data.get('status')
-                logger.info(f"Hardware pan position updated to {current_position}, status: {status}")
+                logger.debug(f"Hardware pan position updated to {current_position}, status: {status}")
                 # Optional: could save to DB or broadcast to other consumers (like an agent/frontend consumer)
                 
             elif message_type == 'error':
