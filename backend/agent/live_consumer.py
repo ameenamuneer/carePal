@@ -718,15 +718,22 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                 return
 
             if text_data:
-                # Fallback for old text protocol
+                # Fallback for old text protocol.
                 data = json.loads(text_data)
                 msg_type = data.get("type")
-                if msg_type in ["audio", "image"]:
-                    payload = {
-                        "mime_type": data.get("mime_type"),
-                        "data": data.get("data")
-                    }
-                    await self.input_queue.put(payload)
+                if msg_type == "audio":
+                    # NEVER forward mic audio to Gemini. This model is driven only
+                    # by injected TEXT (mic → energy VAD → ElevenLabs → text), and
+                    # sending audio makes the Live API close the socket with
+                    # 1007 "CONTENT_TYPE_AUDIO not supported for this model
+                    # configuration". Audio must go through the 0x00 binary path.
+                    logger.debug("Ignoring legacy JSON 'audio' frame (audio is never sent to Gemini).")
+                elif msg_type == "image":
+                    if SEND_FRAMES_TO_GEMINI:
+                        await self.input_queue.put({
+                            "mime_type": data.get("mime_type"),
+                            "data": data.get("data"),
+                        })
                 elif msg_type == "text":
                     await self.input_queue.put({"text": data.get("data")})
 
@@ -1323,7 +1330,13 @@ Meal Logging:
                     logger.info(f"Sending text to Gemini: {item['text']}")
                     await self.session.send(input=item["text"], end_of_turn=True)
                 else:
-                    # It's media (image) dict {"mime_type":..., "data":...}
+                    # It's media (image) dict {"mime_type":..., "data":...}.
+                    # Guard: never forward audio — the Live API rejects it with
+                    # 1007 and closes the socket. Audio is handled locally only.
+                    mime = str(item.get("mime_type") or "")
+                    if mime.startswith("audio"):
+                        logger.debug(f"sender_loop dropped audio media ({mime}); audio is never sent to Gemini.")
+                        continue
                     # Send dict with Base64 exactly as the SDK expects for LiveConnect!
                     await self.session.send(input=item)
                     
