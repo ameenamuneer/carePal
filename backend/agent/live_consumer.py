@@ -1,5 +1,6 @@
 
 import os
+import re
 import json
 import logging
 import asyncio
@@ -52,6 +53,15 @@ VAD_ENERGY_THRESHOLD = 0.012  # frame RMS above this counts as speech
 VAD_MIN_SPEECH_MS = 200      # min cumulative speech before EOS can fire
 VAD_SILENCE_MS = 700         # trailing real-time silence that ends an utterance
 
+# Barge-in: while the AI is speaking we watch the mic with a SEPARATE, less
+# sensitive detector so the user can interrupt. The threshold is deliberately
+# higher than the normal onset threshold so faint background noise or the echo
+# of the AI's own voice cannot falsely interrupt; a short sustained run is also
+# required. Once confirmed we stop playback, tell Gemini to drop its turn, and
+# start capturing the user's interrupting utterance.
+VAD_BARGE_IN_ENERGY_THRESHOLD = 0.03   # higher than VAD_ENERGY_THRESHOLD (0.012)
+VAD_BARGE_IN_MIN_SPEECH_MS = 300       # sustained loud speech needed to confirm
+
 # ElevenLabs Scribe STT (see agent/elevenlabs_stt.py). Language auto-detected.
 STT_MODEL_ID = "scribe_v2"
 STT_TIMEOUT_MS = 20000
@@ -87,6 +97,11 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         self._window_active = False
         # Guard so only one transcription runs at a time.
         self._transcribing = False
+        # Barge-in detector, active only while the AI is speaking (None = idle).
+        self._barge_in = None
+        # After a barge-in we discard the interrupted turn's trailing audio until
+        # the next turn_complete / new injected turn takes over.
+        self._suppress_ai_audio = False
         # ElevenLabs API key (resolved once; utterances skip STT if absent).
         self._elevenlabs_key = (
             os.environ.get("ELEVENLABS_API_KEY")
@@ -347,6 +362,34 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         self._eos = None
         self._mic_buf = []
 
+    def _start_barge_in_detector(self):
+        """Arm a fresh, less-sensitive detector for the current AI turn."""
+        self._barge_in = EnergyEosDetector(
+            rate=INPUT_RATE,
+            energy_threshold=VAD_BARGE_IN_ENERGY_THRESHOLD,
+            min_speech_ms=VAD_BARGE_IN_MIN_SPEECH_MS,
+            silence_ms=VAD_SILENCE_MS,  # unused here; we only read `saw_speech`
+        )
+
+    async def _handle_barge_in(self):
+        """
+        The user is talking over the AI. Stop the AI's playback, suppress the
+        rest of its (now interrupted) turn, and open a listening window so the
+        interrupting utterance is captured → transcribed → injected as a new
+        turn (which also interrupts Gemini's generation server-side).
+        """
+        logger.info("🙋 Barge-in confirmed — interrupting AI playback.")
+        self._barge_in = None
+        self.ai_is_speaking = False
+        self._suppress_ai_audio = True
+        # Hard-stop AI audio on the client (frontend flushes its playback graph).
+        try:
+            await self.send(bytes_data=bytes([0x03]))
+        except Exception as e:
+            logger.error(f"Barge-in: failed to send interrupt to client: {e}")
+        # Begin capturing the user's interrupting speech.
+        self._begin_window()
+
     async def _vad_ticker(self):
         """
         Long-lived wall-clock poller. Every VAD_TICK_MS it asks the current
@@ -415,8 +458,21 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                 self._begin_window()
                 return
 
+            # Scribe annotates non-speech audio events in brackets, e.g.
+            # "[Background noise]", "[clicking sound]". These are useful when they
+            # accompany real speech, but a transcript containing ONLY such tags
+            # means the user did not actually say anything — do not trigger a
+            # response. Strip the tags; if nothing lexical remains, skip.
+            lexical = re.sub(r'\[[^\]]*\]|\([^\)]*\)', '', text).strip()
+            if not lexical:
+                logger.info(f"Transcript is non-speech only ({text!r}); skipping injection.")
+                self._begin_window()
+                return
+
             logger.info(f"🗣️ Transcript injected: {text!r}")
             self.current_user_text = text
+            # This new turn supersedes any interrupted AI turn: allow audio again.
+            self._suppress_ai_audio = False
             # Inject as a completed user turn. The window reopens on turn_complete.
             await self.input_queue.put({"text": text})
         finally:
@@ -437,15 +493,25 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                 payload_data = bytes_data[1:]
 
                 if msg_type_byte == 0x00:
-                    # Mic PCM16 frame. This audio is NEVER sent to Gemini. It is
-                    # only buffered + fed to the energy VAD while a listening
-                    # window is open and the AI is not speaking (half-duplex).
-                    if not self._window_active or self.ai_is_speaking or self._eos is None:
-                        return
+                    # Mic PCM16 frame. This audio is NEVER sent to Gemini.
                     if len(payload_data) < 2:
                         return
                     frame = np.frombuffer(payload_data, dtype=np.int16)
                     if frame.size == 0:
+                        return
+
+                    # While the AI is speaking, watch for a barge-in with the
+                    # less-sensitive detector; everything else is ignored.
+                    if self.ai_is_speaking:
+                        if self._barge_in is not None:
+                            self._barge_in.push_audio(frame)
+                            if self._barge_in.saw_speech:
+                                await self._handle_barge_in()
+                        return
+
+                    # Normal listening: buffer the utterance and feed the energy
+                    # VAD while a window is open (half-duplex).
+                    if not self._window_active or self._eos is None:
                         return
                     self._mic_buf.append(frame)
                     self._eos.push_audio(frame)
@@ -775,6 +841,8 @@ Recent conversation history:
                     # it will not greet unprompted). The window is recreated on
                     # every turn_complete thereafter.
                     self.ai_is_speaking = False
+                    self._barge_in = None
+                    self._suppress_ai_audio = False
                     self._begin_window()
                     logger.info("Connected to Gemini Live")
                     
@@ -791,9 +859,16 @@ Recent conversation history:
                                 
                                 # 1. Handle actual media/text content first
                                 if response.data:
-                                    self.ai_is_speaking = True
-                                    payload = bytes([0x00]) + response.data
-                                    await self.send(bytes_data=payload)
+                                    # After a barge-in, discard the interrupted
+                                    # turn's trailing audio instead of replaying it.
+                                    if not self._suppress_ai_audio:
+                                        if not self.ai_is_speaking:
+                                            # Transition into AI speech: arm a fresh
+                                            # barge-in detector for this turn.
+                                            self.ai_is_speaking = True
+                                            self._start_barge_in_detector()
+                                        payload = bytes([0x00]) + response.data
+                                        await self.send(bytes_data=payload)
 
                                 if response.text:
                                     logger.info(f"[AI_SPEAKING={self.ai_is_speaking}] Received text: {response.text[:50]}...")
@@ -811,10 +886,15 @@ Recent conversation history:
                                         logger.info(f"[AI_SPEAKING={self.ai_is_speaking}] Gemini signaled interrupt. Sending 0x03 to frontend.")
                                         await self.send(bytes_data=bytes([0x03]))
                                         self.ai_is_speaking = False
+                                        self._barge_in = None
 
                                     if getattr(server_content, 'turn_complete', False):
                                         logger.info(f"[AI_SPEAKING={self.ai_is_speaking}] Server content: turn_complete=True. Resetting flag.")
                                         self.ai_is_speaking = False
+                                        self._barge_in = None
+                                        # Any barge-in suppression is stale once a
+                                        # turn ends; let subsequent audio play.
+                                        self._suppress_ai_audio = False
 
                                         user_t = self.current_user_text.strip()
                                         ai_t = self.current_ai_text.strip()
@@ -824,9 +904,11 @@ Recent conversation history:
                                         self.current_user_text = ""
                                         self.current_ai_text = ""
 
-                                        # Model finished speaking → open a fresh
-                                        # listening window for the next utterance.
-                                        self._begin_window()
+                                        # Model finished speaking → open a listening
+                                        # window, unless a barge-in already opened one
+                                        # that is still capturing the user's speech.
+                                        if not self._window_active:
+                                            self._begin_window()
                                         
                                 # 3. Handle Tool Calls directly on response OR inside model_turn
                                 function_calls = []
