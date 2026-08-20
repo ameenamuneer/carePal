@@ -109,12 +109,9 @@ LIVE_GEMINI_FRAME_FPS = 0    # JPEG frames sent to Gemini for vision (0 = off)
 # offset is the target's horizontal displacement from frame centre, normalized
 # to [-1, 1] (negative = subject left of centre, positive = right).
 TRACK_DEADZONE          = 0.12   # |offset| below this = centred, no pan
-TRACK_PAN_GAIN          = 28.0   # degrees per unit offset (proportional Kp).
-                                 # Kept below the ~30° half-FOV so each step
-                                 # under-shoots and converges without oscillating.
+TRACK_PAN_GAIN          = 28.0   # degrees per unit offset (proportional Kp)
 TRACK_MIN_STEP          = 1      # smallest non-zero correction (degrees)
-TRACK_MAX_STEP          = 25     # clamp on a single correction (degrees); stays
-                                 # under half-FOV so no single step crosses centre
+TRACK_MAX_STEP          = 25     # clamp on a single correction (degrees)
 TRACK_COOLDOWN_MS       = 250    # min gap between consecutive pan commands
 TRACK_MIN_CONF          = 0.50   # ignore detections below this confidence
 
@@ -157,6 +154,14 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         # After a barge-in we discard the interrupted turn's trailing audio until
         # the next turn_complete / new injected turn takes over.
         self._suppress_ai_audio = False
+        # Empty-turn recovery: native-audio models occasionally close a turn
+        # without emitting any audio/text/tool call (e.g. after a disfluent input
+        # the model "thinks" and says nothing). _turn_saw_output flips True on any
+        # real model output this turn; if a turn completes with none, we re-prompt
+        # the last user text exactly once (_empty_turn_retried guards against loops).
+        self._turn_saw_output = False
+        self._last_injected_text = ""
+        self._empty_turn_retried = False
         # ElevenLabs API key (resolved once; utterances skip STT if absent).
         self._elevenlabs_key = (
             os.environ.get("ELEVENLABS_API_KEY")
@@ -632,6 +637,11 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
             self.current_user_text = text
             # This new turn supersedes any interrupted AI turn: allow audio again.
             self._suppress_ai_audio = False
+            # Track this as the prompt to re-send if the model returns an empty
+            # turn, and reset the per-turn output/ retry guards for the new turn.
+            self._last_injected_text = text
+            self._empty_turn_retried = False
+            self._turn_saw_output = False
             # Inject as a completed user turn. The window reopens on turn_complete.
             await self.input_queue.put({"text": text})
         finally:
@@ -1049,6 +1059,9 @@ Meal Logging:
                     self._barge_in_checking = False
                     self._barge_in_cooldown_until = 0.0
                     self._suppress_ai_audio = False
+                    self._turn_saw_output = False
+                    self._last_injected_text = ""
+                    self._empty_turn_retried = False
                     self._begin_window()
                     logger.info("Connected to Gemini Live")
                     
@@ -1091,11 +1104,13 @@ Meal Logging:
                                             # barge-in detector for this turn.
                                             self.ai_is_speaking = True
                                             self._start_barge_in_detector()
+                                        self._turn_saw_output = True
                                         payload = bytes([0x00]) + response.data
                                         await self.send(bytes_data=payload)
 
                                 if response.text:
                                     logger.debug(f"[AI_SPEAKING={self.ai_is_speaking}] Received text: {response.text[:50]}...")
+                                    self._turn_saw_output = True
                                     self.current_ai_text += response.text
                                     payload = bytes([0x02]) + json.dumps({
                                         "type": "text",
@@ -1120,19 +1135,51 @@ Meal Logging:
                                         # turn ends; let subsequent audio play.
                                         self._suppress_ai_audio = False
 
-                                        user_t = self.current_user_text.strip()
-                                        ai_t = self.current_ai_text.strip()
-                                        if user_t or ai_t:
-                                            asyncio.create_task(self.save_turn_messages(user_t, ai_t))
+                                        # Empty-turn recovery: if the model closed the
+                                        # turn without any audio/text/tool call, it
+                                        # silently ignored the user. Re-send the last
+                                        # user text ONCE to elicit a real response.
+                                        if (
+                                            not self._turn_saw_output
+                                            and self._last_injected_text
+                                            and not self._empty_turn_retried
+                                        ):
+                                            self._empty_turn_retried = True
+                                            self._turn_saw_output = False
+                                            logger.info(
+                                                "Model returned an empty turn (no "
+                                                "audio/text/tool call); re-prompting "
+                                                "the last user message once."
+                                            )
+                                            # Don't save yet (no AI reply) and don't
+                                            # open a listening window — re-drive the
+                                            # same turn. current_user_text is kept so
+                                            # it saves after the retry completes.
+                                            await self.input_queue.put(
+                                                {"text": self._last_injected_text}
+                                            )
+                                        else:
+                                            if not self._turn_saw_output:
+                                                logger.info(
+                                                    "Model returned an empty turn "
+                                                    "again after retry; giving up."
+                                                )
+                                            user_t = self.current_user_text.strip()
+                                            ai_t = self.current_ai_text.strip()
+                                            if user_t or ai_t:
+                                                asyncio.create_task(self.save_turn_messages(user_t, ai_t))
 
-                                        self.current_user_text = ""
-                                        self.current_ai_text = ""
+                                            self.current_user_text = ""
+                                            self.current_ai_text = ""
+                                            self._last_injected_text = ""
+                                            self._empty_turn_retried = False
+                                            self._turn_saw_output = False
 
-                                        # Model finished speaking → open a listening
-                                        # window, unless a barge-in already opened one
-                                        # that is still capturing the user's speech.
-                                        if not self._window_active:
-                                            self._begin_window()
+                                            # Model finished speaking → open a listening
+                                            # window, unless a barge-in already opened one
+                                            # that is still capturing the user's speech.
+                                            if not self._window_active:
+                                                self._begin_window()
                                         
                                 # 3. Handle Tool Calls directly on response OR inside model_turn
                                 function_calls = []
@@ -1147,6 +1194,10 @@ Meal Logging:
                                             if hasattr(part, 'function_call') and part.function_call:
                                                 function_calls.append(part.function_call)
                                 
+                                if function_calls:
+                                    # A tool call counts as real model output for
+                                    # empty-turn detection (the model acted).
+                                    self._turn_saw_output = True
                                 for fc in function_calls:
                                     logger.info(f"Function call requested: {fc.name}")
                                     fc_args = dict(fc.args) if hasattr(fc, "args") and fc.args else {}
