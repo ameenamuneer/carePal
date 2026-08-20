@@ -115,6 +115,19 @@ TRACK_MAX_STEP          = 35     # clamp on a single correction (degrees)
 TRACK_COOLDOWN_MS       = 80    # min gap between consecutive pan commands
 TRACK_MIN_CONF          = 0.50   # ignore detections below this confidence
 
+# ── Object-loss coasting / search (dead-reckoning) ───────────────────────────
+# When the subject suddenly disappears, extrapolate the direction it was moving
+# from a short position history and pan that way to search for it, up to a bounded
+# total travel before giving up. Driven by the found=false frames the phone keeps
+# streaming at the detection rate — no separate timer.
+TRACK_COAST_ENABLE      = True
+TRACK_HISTORY_MS        = 500    # window of recent found samples kept for velocity
+TRACK_COAST_MIN_VEL     = 0.6    # min |dx|/sec at loss to treat it as real motion;
+                                 # below this = detection blip → hold, don't chase
+TRACK_COAST_STEP        = 6      # degrees per search pan while coasting
+TRACK_SEARCH_MAX_DEG    = 60     # cumulative search-travel cap before giving up
+TRACK_COAST_TIMEOUT_MS  = 1500   # also give up if the subject stays lost this long
+
 class GeminiLiveConsumer(AsyncWebsocketConsumer):
     async def connect(self):
         await self.accept()
@@ -186,8 +199,21 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
             "max_step":        TRACK_MAX_STEP,
             "cooldown_ms":     TRACK_COOLDOWN_MS,
             "min_conf":        TRACK_MIN_CONF,
+            "coast_enable":    TRACK_COAST_ENABLE,
+            "history_ms":      TRACK_HISTORY_MS,
+            "coast_min_vel":   TRACK_COAST_MIN_VEL,
+            "coast_step":      TRACK_COAST_STEP,
+            "search_max_deg":  TRACK_SEARCH_MAX_DEG,
+            "coast_timeout_ms": TRACK_COAST_TIMEOUT_MS,
         }
         self._last_edge_pan_ms = 0.0
+        # Object-loss coasting state. _track_hist holds recent (t_ms, dx) samples
+        # from found detections; on a sudden loss we extrapolate a search direction.
+        self._track_hist = deque()
+        self._coasting = False        # currently searching for a lost subject
+        self._coast_dir = 0           # +1 / -1 extrapolated search direction
+        self._search_travel = 0.0     # cumulative degrees panned this search
+        self._coast_start_ms = 0.0    # when the current search began
         # Pushed to the client so it can initialize its two capture timers +
         # detection filtering. Only the subset the client needs is sent.
         await self._push_config()
@@ -1425,23 +1451,38 @@ Meal Logging:
         Sign convention matches the legacy YOLO controller (subject-left → negative
         delta). Corrections ramp proportionally from min_step at the edge of the
         deadzone up to max_step near the frame edge.
+
+        When the subject is lost (found=false), hand off to _handle_track_lost,
+        which extrapolates the last motion direction and pans to search for it.
         """
         if not ENABLE_EDGE_TRACKING:
             return
         cfg = self._track_cfg
         now_ms = time.monotonic() * 1000.0
 
-        if not bool(data.get("found", True)):
-            return
+        found = bool(data.get("found", True))
         try:
             conf = float(data.get("conf", 1.0))
             dx = float(data.get("dx", 0.0))
         except (TypeError, ValueError):
             return
-        if conf < cfg["min_conf"]:
+
+        # ── Subject lost → coast/search in the extrapolated direction ────────
+        if not found or conf < cfg["min_conf"]:
+            await self._handle_track_lost(now_ms)
             return
 
+        # ── Subject visible → normal proportional tracking ───────────────────
         dx = max(-1.0, min(1.0, dx))
+        # Buffer position for velocity extrapolation; drop samples out of window.
+        self._track_hist.append((now_ms, dx))
+        self._prune_track_hist(now_ms)
+        # Re-acquired → cancel any in-progress search.
+        if self._coasting:
+            logger.info("[coast] subject re-acquired; ending search")
+            self._coasting = False
+            self._search_travel = 0.0
+
         if abs(dx) < cfg["deadzone"]:
             return   # subject sufficiently centred
 
@@ -1453,6 +1494,70 @@ Meal Logging:
         magnitude = max(cfg["min_step"], min(cfg["max_step"], magnitude))
         delta = int(round(magnitude)) * (1 if dx > 0 else -1)
 
+        self._last_edge_pan_ms = now_ms
+        await self._send_hardware_pan(delta)
+
+    def _prune_track_hist(self, now_ms: float):
+        """Drop buffered position samples older than the history window."""
+        window = self._track_cfg["history_ms"]
+        hist = self._track_hist
+        while hist and now_ms - hist[0][0] > window:
+            hist.popleft()
+
+    def _estimate_track_velocity(self, now_ms: float):
+        """Horizontal offset velocity (dx units/sec) over the recent history
+        window, or None if there isn't enough data to estimate it."""
+        self._prune_track_hist(now_ms)
+        hist = self._track_hist
+        if len(hist) < 2:
+            return None
+        t0, x0 = hist[0]
+        t1, x1 = hist[-1]
+        dt = (t1 - t0) / 1000.0
+        if dt <= 0.0:
+            return None
+        return (x1 - x0) / dt
+
+    async def _handle_track_lost(self, now_ms: float):
+        """Dead-reckoning search when the subject disappears.
+
+        Starts a search only if the subject was genuinely moving when it vanished
+        (a low-velocity disappearance is almost certainly a one-frame detection
+        blip, so we hold). While searching, pan in the extrapolated direction each
+        lost frame until either the cumulative travel cap or the timeout is hit,
+        then give up and hold until the subject is re-acquired.
+        """
+        cfg = self._track_cfg
+        if not cfg["coast_enable"]:
+            return
+
+        if not self._coasting:
+            vel = self._estimate_track_velocity(now_ms)
+            if vel is None or abs(vel) < cfg["coast_min_vel"]:
+                return   # not moving (or no data) → treat as a blip, hold
+            self._coasting = True
+            self._coast_dir = 1 if vel > 0 else -1
+            self._coast_start_ms = now_ms
+            self._search_travel = 0.0
+            logger.info(
+                f"[coast] subject lost while moving (v={vel:.2f}/s); searching "
+                f"{'right' if self._coast_dir > 0 else 'left'}"
+            )
+
+        # Stop conditions: searched the full arc, or lost for too long.
+        if (self._search_travel >= cfg["search_max_deg"]
+                or now_ms - self._coast_start_ms > cfg["coast_timeout_ms"]):
+            return
+        if now_ms - self._last_edge_pan_ms < cfg["cooldown_ms"]:
+            return
+
+        step = min(cfg["coast_step"], cfg["search_max_deg"] - self._search_travel)
+        if step < 1.0:
+            return
+        delta = int(round(step)) * self._coast_dir
+        if delta == 0:
+            return
+        self._search_travel += abs(delta)
         self._last_edge_pan_ms = now_ms
         await self._send_hardware_pan(delta)
 
