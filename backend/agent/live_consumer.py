@@ -109,10 +109,10 @@ LIVE_GEMINI_FRAME_FPS = 0    # JPEG frames sent to Gemini for vision (0 = off)
 # offset is the target's horizontal displacement from frame centre, normalized
 # to [-1, 1] (negative = subject left of centre, positive = right).
 TRACK_DEADZONE          = 0.12   # |offset| below this = centred, no pan
-TRACK_PAN_GAIN          = 28.0   # degrees per unit offset (proportional Kp)
-TRACK_MIN_STEP          = 1      # smallest non-zero correction (degrees)
-TRACK_MAX_STEP          = 25     # clamp on a single correction (degrees)
-TRACK_COOLDOWN_MS       = 250    # min gap between consecutive pan commands
+TRACK_PAN_GAIN          = 8.0   # degrees per unit offset (proportional Kp)
+TRACK_MIN_STEP          = 0.5      # smallest non-zero correction (degrees)
+TRACK_MAX_STEP          = 35     # clamp on a single correction (degrees)
+TRACK_COOLDOWN_MS       = 100    # min gap between consecutive pan commands
 TRACK_MIN_CONF          = 0.50   # ignore detections below this confidence
 
 class GeminiLiveConsumer(AsyncWebsocketConsumer):
