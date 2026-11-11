@@ -64,6 +64,7 @@ def transcribe_elevenlabs(
     api_key: Optional[str] = None,
     tag_audio_events: bool = True,
     language_code: Optional[str] = None,
+    keyterms: Optional[list] = None,
 ) -> str:
     """
     Transcribe a finished utterance. Blocking (uses `requests`); call via
@@ -75,6 +76,10 @@ def transcribe_elevenlabs(
     so noise yields an empty string instead of a bracket tag.
 
     `language_code` (ISO-639-3, e.g. "mal") is an optional language hint.
+
+    `keyterms` biases recognition toward known words (names, medicines, places).
+    Max 1000 terms of ≤50 chars / ≤5 words each; billed as an add-on
+    (~$0.05 per audio hour on scribe_v2).
     """
     key = api_key or get_elevenlabs_key()
     if not key:
@@ -90,6 +95,8 @@ def transcribe_elevenlabs(
     }
     if language_code:
         data["language_code"] = language_code
+    if keyterms:
+        data["keyterms"] = list(keyterms)  # sent as repeated form fields
     files = {"file": ("audio.wav", wav, "audio/wav")}
 
     # Do NOT set Content-Type manually — requests sets the multipart boundary.
@@ -109,4 +116,8 @@ def transcribe_elevenlabs(
         raise RuntimeError(f"ElevenLabs HTTP {resp.status_code}: {detail}")
 
     j = resp.json()
-    return str(j.get("text") or "").strip()
+    text = str(j.get("text") or "").strip()
+    # With keyterms, Scribe sometimes wraps the whole transcript in quotes.
+    if len(text) >= 2 and text[0] == text[-1] == '"':
+        text = text[1:-1].strip()
+    return text

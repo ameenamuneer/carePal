@@ -25,7 +25,7 @@ class PatientProfileAdmin(admin.ModelAdmin):
             'fields': ('health_conditions', 'allergies', 'current_medications', 'medical_notes', 'last_hospital_visit')
         }),
         ('Preferences', {
-            'fields': ('preferred_language', 'personal_notes', 'personal_notes_updated_at')
+            'fields': ('preferred_language', 'personal_notes', 'personal_notes_updated_at', 'stt_keyterms')
         }),
         ('Status', {
             'fields': ('is_active', 'created_at', 'updated_at')

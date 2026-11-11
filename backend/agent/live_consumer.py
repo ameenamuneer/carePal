@@ -101,6 +101,16 @@ VAD_ENERGY_THRESHOLD = 0.030  # frame RMS above this counts as speech
 VAD_MIN_SPEECH_MS = 300      # min cumulative speech before EOS can fire
 VAD_SILENCE_MS = 700         # trailing real-time silence that ends an utterance
 
+# Pauses mid-sentence: VAD_SILENCE_MS can end an utterance at a mere pause. So
+# after each end-of-speech a new listening window opens at once ("continuation"
+# window). If the patient goes on speaking before the AI's reply starts playing,
+# that speech is transcribed and sent as a follow-up in the SAME turn (the model
+# drops its pending reply and answers both). If the reply's audio arrives while
+# the patient is still talking, it is held back; it is discarded if the patient
+# really said more, and played if it was only noise. Holding never outlasts
+# CONTINUATION_HOLD_MAX_S.
+CONTINUATION_HOLD_MAX_S = 30
+
 # Rolling pre-roll: keep this much of the most recent mic audio at all times so
 # that when a speech / barge-in trigger fires (possibly late, due to the raised
 # threshold) we can prepend the lead-in and not miss the utterance onset.
@@ -130,6 +140,10 @@ VAD_BARGE_IN_COOLDOWN_MS = 1200
 # which mostly matters for short barge-in snippets.
 STT_MODEL_ID = "scribe_v2"
 STT_TIMEOUT_MS = 20000
+
+# Known words ("keyterms", see agent/stt_keyterms.py) bias Scribe toward names,
+# medicines and places, but make each transcription slower. Off for now.
+STT_KEYTERMS_ENABLED = False
 
 # Unicode script (prefix of each letter's unicodedata name) → ISO-639-3 hint.
 # Malayalam, Tamil, Hindi and English each use a distinct script, so counting
@@ -289,11 +303,20 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         self._last_tool_response_at = 0.0
         # ISO-639-3 hint for STT: the language last spoken by either side.
         self._lang_hint = None
+        # Known words for speech recognition (filled in connect()).
+        self._stt_keyterms = []
         # Gemini Live session resumption handle (valid ~2h after a disconnect).
         self._resume_handle = None
         # Set by a go_away-triggered planned reconnect (skips the backoff sleep).
         self._planned_reconnect = False
         self._go_away_task = None
+        # Continuation after a pause (see CONTINUATION_HOLD_MAX_S): is the open
+        # listening window a continuation of a message already sent, and AI audio
+        # held back while the patient was still talking.
+        self._continuation = False
+        self._holding_for_continuation = False
+        self._hold_started_at = 0.0
+        self._held_audio = []
         # Camera: is the app's live feed on (camera button)? Latest frame received
         # (for the adjust_camera orchestrator), and futures waiting for the next
         # frame after a snapshot request.
@@ -345,6 +368,10 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         await self._push_config()
 
         self.patient = await self._load_patient()
+        # Known words for STT, prepared in the background (one cached Gemini
+        # call) so connecting is not delayed; transcription uses none until ready.
+        if STT_KEYTERMS_ENABLED:
+            self._keyterms_task = asyncio.create_task(self._prepare_stt_keyterms())
         self.task = asyncio.create_task(self.run_gemini_session())
         logger.info(f"Gemini Live WebSocket connected for user: {self.user}")
 
@@ -526,6 +553,16 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         except Exception as e:
             logger.error(f"Error fetching recent messages: {e}")
             return "Error fetching conversation history."
+
+    async def _prepare_stt_keyterms(self):
+        """Known words for speech recognition, in every app script (see agent/stt_keyterms.py)."""
+        from .stt_keyterms import build_keyterms, expand_scripts
+        try:
+            terms = await database_sync_to_async(build_keyterms)(self.patient)
+            self._stt_keyterms = await asyncio.to_thread(expand_scripts, terms)
+            logger.info(f"STT keyterms ready ({len(self._stt_keyterms)}): {self._stt_keyterms[:12]}")
+        except Exception as e:
+            logger.warning(f"Could not prepare STT keyterms: {e}")
 
     @database_sync_to_async
     def _load_patient(self):
@@ -761,6 +798,44 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         self._mark_turn_sent()
         self._turn_activity = True
 
+    def _patient_continuing(self) -> bool:
+        """The patient started speaking again in a continuation window."""
+        return (
+            self._continuation
+            and self._window_active
+            and self._eos is not None
+            and self._eos.saw_speech
+        )
+
+    def _discard_held_audio(self):
+        self._held_audio = []
+        self._holding_for_continuation = False
+
+    async def _release_held_audio(self):
+        """The patient's extra speech was only noise: play the held reply."""
+        if not self._holding_for_continuation:
+            return
+        chunks = self._held_audio
+        self._discard_held_audio()
+        if not chunks or self._suppress_ai_audio:
+            return
+        logger.info("Releasing held AI reply (no follow-up speech).")
+        await self._start_ai_audio()
+        for chunk in chunks:
+            self._turn_audio_bytes += len(chunk)
+            await self.send(bytes_data=bytes([0x00]) + chunk)
+
+    async def _start_ai_audio(self):
+        """Transition into AI speech: arm barge-in, stop continuation capture."""
+        if self._continuation:
+            self._continuation = False
+            self._close_window()
+        if not self.ai_is_speaking:
+            self.ai_is_speaking = True
+            self._start_barge_in_detector()
+        if self._turn_audio_started_at is None:
+            self._turn_audio_started_at = time.monotonic()
+
     def _end_stale_close(self):
         """The interrupted turn has closed: stop suppressing its audio."""
         self._expect_stale_close = False
@@ -774,6 +849,7 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         self._turn_open = False
         self.ai_is_speaking = False
         self._barge_in = None
+        self._continuation = False
         # Any barge-in suppression is stale once a turn ends; let subsequent
         # audio play.
         self._suppress_ai_audio = False
@@ -834,6 +910,11 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         if self._expect_stale_close and now >= self._expect_stale_close_until:
             logger.info("Interrupted turn never closed; ending audio suppression.")
             self._end_stale_close()
+        if self._holding_for_continuation:
+            if now - self._hold_started_at > CONTINUATION_HOLD_MAX_S:
+                logger.warning("Held AI reply for too long; releasing it.")
+                await self._release_held_audio()
+            return  # resolved by the continuation's transcription
         if not self._turn_open:
             return
         quiet = now - self._last_server_msg_at
@@ -977,6 +1058,10 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                         )
                         self._close_window()
                         if saw_speech and utterance.size > 0:
+                            # Keep listening while this is transcribed and answered:
+                            # the "end" may just be a pause mid-sentence.
+                            self._begin_window()
+                            self._continuation = True
                             await self._transcribe_and_inject(utterance)
                         else:
                             # Nothing meaningful captured; reopen and keep listening.
@@ -997,7 +1082,9 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         try:
             if not self._elevenlabs_key:
                 logger.warning("Skipping STT (no ELEVENLABS_API_KEY); reopening window.")
-                self._begin_window()
+                await self._release_held_audio()
+                if not self._window_active:
+                    self._begin_window()
                 return
 
             try:
@@ -1009,6 +1096,7 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                     STT_TIMEOUT_MS / 1000.0,
                     self._elevenlabs_key,
                     language_code=self._lang_hint,
+                    keyterms=self._stt_keyterms if STT_KEYTERMS_ENABLED else None,
                 )
             except Exception as e:
                 logger.error(f"ElevenLabs STT failed: {e}")
@@ -1017,7 +1105,9 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
             text = (text or "").strip()
             if not text:
                 logger.info("Empty transcript; reopening listening window.")
-                self._begin_window()
+                await self._release_held_audio()
+                if not self._window_active:
+                    self._begin_window()
                 return
 
             # Scribe annotates non-speech audio events in brackets, e.g.
@@ -1028,29 +1118,60 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
             lexical = re.sub(r'\[[^\]]*\]|\([^\)]*\)', '', text).strip()
             if not lexical:
                 logger.info(f"Transcript is non-speech only ({text!r}); skipping injection.")
-                self._begin_window()
+                await self._release_held_audio()
+                if not self._window_active:
+                    self._begin_window()
                 return
             # Mostly in scripts the patient doesn't speak (e.g. '我就是', 'أقول'):
             # the patient said something STT could not recognise. Don't pass the
             # garbage on, but tell the model so it asks them to repeat instead of
             # staying silent. Not saved as a patient message.
             unclear = self._script_lang(lexical) is None
+            if unclear and self._turn_open and self._turn_audio_started_at is None:
+                # Unrecognisable sound after a pause, while a reply is pending:
+                # treat it as noise rather than replacing the reply with a
+                # "please repeat".
+                logger.info(f"Unrecognisable speech after a pause ({text!r}); ignoring it.")
+                await self._release_held_audio()
+                if not self._window_active:
+                    self._begin_window()
+                return
             if unclear:
                 logger.info(f"Transcript not in an expected language ({text!r}); telling the model the audio was unclear.")
                 text = UNCLEAR_AUDIO_NOTICE
             else:
                 logger.info(f"🗣️ Transcript injected: {text!r}")
                 self._update_lang_hint(lexical)
-            # A barge-in left the interrupted turn open: persist what was said in
-            # it before this new turn takes over.
-            barge = self._suppress_ai_audio
-            if barge and self._turn_open:
-                old_user = self.current_user_text.strip()
-                old_ai = self.current_ai_text.strip()
-                if old_user or old_ai:
-                    asyncio.create_task(self.save_turn_messages(old_user, old_ai))
+            # The patient went on speaking after a pause, before any of the reply
+            # was played: this is the rest of the same message. Send it as a
+            # follow-up (the model drops its pending reply and answers both) and
+            # keep both parts as one saved message.
+            continuation = self._turn_open and self._turn_audio_started_at is None
+            if continuation:
+                logger.info("Patient continued after a pause; adding to the same turn.")
+                self._discard_held_audio()
                 self.current_ai_text = ""
-            self.current_user_text = "" if unclear else text
+                # A superseded reply that is still being generated would keep
+                # streaming: drop it until Gemini confirms the interrupt. One that
+                # already finished sends nothing more (and no interrupt), so
+                # muting would only swallow the new reply.
+                if self._turn_activity and not self._turn_gen_done:
+                    self._suppress_ai_audio = True
+                barge = self._suppress_ai_audio
+                if not unclear:
+                    self.current_user_text = f"{self.current_user_text} {text}".strip()
+            else:
+                await self._release_held_audio()
+                # A barge-in left the interrupted turn open: persist what was said in
+                # it before this new turn takes over.
+                barge = self._suppress_ai_audio
+                if barge and self._turn_open:
+                    old_user = self.current_user_text.strip()
+                    old_ai = self.current_ai_text.strip()
+                    if old_user or old_ai:
+                        asyncio.create_task(self.save_turn_messages(old_user, old_ai))
+                    self.current_ai_text = ""
+                self.current_user_text = "" if unclear else text
             # Track this as the prompt to re-send if the model returns an empty
             # turn, and reset the per-turn output/ retry guards for the new turn.
             self._last_injected_text = text
@@ -1546,6 +1667,8 @@ Meal Logging:
                     self._expect_stale_close = False
                     self._turn_open = False
                     self._tools_outstanding = 0
+                    self._continuation = False
+                    self._discard_held_audio()
                     self._turn_saw_output = False
                     self._last_injected_text = ""
                     self._empty_turn_retried = False
@@ -1679,12 +1802,16 @@ Meal Logging:
                 self._turn_activity = True
                 self._turn_saw_output = True
                 self._turn_gen_done = False
-                if not self.ai_is_speaking:
-                    # Transition into AI speech: arm a fresh barge-in detector.
-                    self.ai_is_speaking = True
-                    self._start_barge_in_detector()
-                if self._turn_audio_started_at is None:
-                    self._turn_audio_started_at = time.monotonic()
+                if self._holding_for_continuation or self._patient_continuing():
+                    # The patient is speaking again after a pause: hold the reply
+                    # until we know whether they were adding to their message.
+                    if not self._holding_for_continuation:
+                        logger.info("Holding AI reply: the patient is still speaking.")
+                        self._holding_for_continuation = True
+                        self._hold_started_at = time.monotonic()
+                    self._held_audio.append(part.inline_data.data)
+                    continue
+                await self._start_ai_audio()
                 self._turn_audio_bytes += len(part.inline_data.data)
                 await self.send(bytes_data=bytes([0x00]) + part.inline_data.data)
             elif part.thought:
@@ -1748,6 +1875,10 @@ Meal Logging:
                     # next message; arriving before any new output, it belongs to
                     # an earlier turn and must not end (or "empty") this one.
                     logger.info("Ignoring stale turn_complete from an earlier turn.")
+                elif self._holding_for_continuation:
+                    # Reply held while the patient adds to their message; the
+                    # continuation decides what happens to this turn.
+                    logger.debug("turn_complete while a reply is held; waiting for the continuation.")
                 elif self._tools_outstanding > 0:
                     # 3.x closes the turn as soon as it calls a tool, then speaks
                     # its follow-up once answered; the watchdog closes the turn

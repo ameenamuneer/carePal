@@ -138,6 +138,15 @@ class PatientProfile(models.Model):
         help_text="Personal notes about the patient, maintained by the AI after each session and editable by caregivers"
     )
     personal_notes_updated_at = models.DateTimeField(null=True, blank=True)
+
+    # Extra words the speech-to-text should listen for (family names, foods,
+    # places, words it keeps mishearing). Added to the names, medicines etc. the
+    # live AI already derives from the profile; see GeminiLiveConsumer.
+    stt_keyterms = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Extra words/phrases for speech recognition (each ≤50 characters, ≤5 words)"
+    )
     last_hospital_visit = models.DateField(null=True, blank=True)
 
     # Nutrition tracking

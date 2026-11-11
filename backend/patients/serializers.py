@@ -46,7 +46,7 @@ class PatientProfileSerializer(serializers.ModelSerializer):
             'pincode', 'country', 'full_address',
             'preferred_language', 'health_conditions', 'allergies',
             'current_medications', 'medical_notes', 'last_hospital_visit',
-            'personal_notes', 'personal_notes_updated_at',
+            'personal_notes', 'personal_notes_updated_at', 'stt_keyterms',
             'emergency_contacts', 'age', 'is_active',
             'created_at', 'updated_at'
         ]
