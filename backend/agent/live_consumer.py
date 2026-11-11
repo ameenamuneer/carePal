@@ -497,10 +497,26 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
             location = ", ".join(
                 part for part in (patient.city, patient.state, patient.country) if part
             )
+
+            def card(*parts):
+                return "; ".join(f"{label}: {value}" for label, value in parts if value)
+
+            doctor = card(
+                ("Name", patient.doctor_name), ("Specialty", patient.doctor_specialty),
+                ("Clinic", patient.doctor_clinic), ("Phone", patient.doctor_phone),
+                ("Email", patient.doctor_email), ("Address", patient.doctor_address),
+                ("Notes", patient.doctor_notes),
+            )
+            pharmacy = card(
+                ("Name", patient.pharmacy_name), ("Phone", patient.pharmacy_phone),
+                ("Address", patient.pharmacy_address), ("Notes", patient.pharmacy_notes),
+            )
             return {
                 "name": patient.user.get_full_name(),
                 "location": location if patient.city else "",
                 "personal_notes": patient.personal_notes.strip(),
+                "doctor": doctor,
+                "pharmacy": pharmacy,
                 "age": str(patient.age) if hasattr(patient, 'age') else "Unknown",
                 "gender": patient.gender if hasattr(patient, 'gender') else "Unknown",
                 "vitals": vitals_str,
@@ -1358,12 +1374,22 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         # conversation context is lost across the reconnect.
         system_instruction = f"""You are CarePAL, a compassionate AI healthcare assistant for home-bound patients.
 
+MOST IMPORTANT STYLE RULE — applies to every reply, in every language:
+Never add a medical disclaimer and never tell the patient to see, ask or consult a doctor or healthcare professional themselves. Checking with the doctor is YOUR job (with the 'contact_doctor' tool). Do not say things like:
+  • "This is not medical advice or diagnosis" / "please consult a healthcare professional"
+  • "ഇത് വൈദ്യോപദേശമോ രോഗനിർണ്ണയമോ അല്ല" / "ഒരു ഡോക്ടറെ സമീപിക്കുക" / "ഡോക്ടറോട് ചോദിക്കുക"
+  • "यह चिकित्सा सलाह या निदान नहीं है" / "किसी स्वास्थ्य पेशेवर से परामर्श लें"
+  • "இது மருத்துவ ஆலோசனை அல்ல" / "மருத்துவரை அணுகவும்"
+Instead, give your helpful answer and, when the doctor's view would genuinely help, offer: "Shall I check with Dr. <doctor's name> about this?" (in the patient's language). Make this offer at most once or twice per topic in a conversation; if the patient declines or doesn't take it up, don't offer again for that topic. Don't open a conversation with such an offer. For emergencies only, tell them to call the doctor or 112 immediately.
+
 Context:
 - Patient Name: {context['name']}
 - Age: {context['age']}
 - Gender: {context['gender']}
 - Current date and time (session start): {self._now_str()}
 - Location: {context.get('location') or "Unknown (ask the patient which town they are in if you need it, e.g. for weather)"}
+- Doctor: {context.get('doctor') or "Not recorded"}
+- Preferred pharmacy: {context.get('pharmacy') or "Not recorded"}
 
 Personal notes about the patient (kept from past conversations; use them naturally to make the conversation personal, never recite them or mention that you keep notes):
 {context.get('personal_notes') or "None yet."}
@@ -1396,6 +1422,10 @@ Your Capabilities:
 4. Seeing: you only see the patient when they turn on the camera feed with the camera button in the app (you then receive about one camera image per second). Whenever you need to see something — a device reading, a medicine, a wound, whether the patient is okay — and you have no current image, call 'view_camera' to take a single snapshot; it works even when the feed is off. Tell the patient briefly that you are taking a look. Never describe or guess what you cannot currently see.
 
 5. You can search the internet (Google Search) for current information: weather, news, sports scores, festival dates, opening hours, prices, or any general question. Search whenever the answer depends on today's information or on facts you are not sure of — never guess. For weather, use the patient's location; if it is unknown, ask which town they are in. Summarise results in one or two short sentences in the patient's language. Do not volunteer distressing news unless asked, and do not use search results to diagnose or change medical treatment.
+
+6. Contacting the doctor: call 'contact_doctor' to send the patient's doctor a QUESTION (when the patient wants the doctor's opinion, or something needs a doctor's judgement: a new or worsening symptom, a possible medicine side effect, wanting to change or stop a medicine, readings that stay abnormal over several days) or a NOTIFICATION (an important event the doctor should know about, such as a fall or several days of missed doses). Do not send minor, routine details (a single slightly high reading, ordinary meals, mild everyday complaints) unless the patient specifically asks you to tell or ask the doctor. If you are the one suggesting it, first ask the patient briefly whether they would like you to ask the doctor; if the patient asks you to, just send it. Write the message clearly for a doctor (what happened, since when, relevant readings and medicines) and include the patient's own words. The doctor replies later through the app, not during this conversation: tell the patient so, and never present your own guess as the doctor's answer. Asking and confirming things with the doctor is YOUR job, not the patient's: never tell the patient to ask, check with, consult or confirm with their doctor (or "a healthcare professional") themselves. Whenever something needs the doctor's input, offer to ask the doctor for them and use 'contact_doctor'. Never add disclaimers such as "this is not medical advice or diagnosis" or "please consult a doctor / healthcare professional", in any language; the patient finds them repetitive. Give your helpful answer, and when a doctor's view would genuinely help, end with an offer instead, e.g. "Shall I check with Dr. <doctor's name> about this?" This is not for emergencies: for anything that sounds urgent (chest pain, trouble breathing, fainting, signs of stroke, severe bleeding) tell the patient to call the doctor's phone or emergency services (112) right away, and also send an URGENT notification.
+
+7. The patient's preferred pharmacy details are in the context above: share them when the patient needs a refill or asks. You cannot place orders.
 
 Rules:
 - Speak clearly and warmly.
@@ -1555,6 +1585,29 @@ Meal Logging:
                                 )
                             },
                             required=["activity_type", "description"]
+                        )
+                    ),
+                    types.FunctionDeclaration(
+                        name="contact_doctor",
+                        description=(
+                            "Send a question or a notification to the patient's doctor. Saved for the doctor, "
+                            "who replies later through the app (not in this conversation). Use only for things "
+                            "that need a doctor's opinion or that the doctor should know about, or when the "
+                            "patient asks; not for minor routine details. Asking or confirming with the doctor is "
+                            "CarePal's responsibility: never tell the patient to ask or consult the doctor "
+                            "themselves; offer to ask on their behalf with this tool instead."
+                        ),
+                        parameters=types.Schema(
+                            type="OBJECT",
+                            properties={
+                                "kind": types.Schema(type="STRING", description="QUESTION (needs the doctor's answer) | NOTIFICATION (for the doctor's information)"),
+                                "category": types.Schema(type="STRING", description="MEDICATION | SYMPTOM | VITALS | APPOINTMENT | OTHER"),
+                                "urgency": types.Schema(type="STRING", description="ROUTINE | SOON (within a day) | URGENT"),
+                                "subject": types.Schema(type="STRING", description="Short subject line, e.g. 'Dizziness after evening dose'."),
+                                "message": types.Schema(type="STRING", description="The question or update written for the doctor: what happened, since when, relevant readings and medicines."),
+                                "patient_words": types.Schema(type="STRING", description="What the patient said about it, in their own words."),
+                            },
+                            required=["kind", "subject", "message"]
                         )
                     ),
                     types.FunctionDeclaration(
@@ -1899,6 +1952,8 @@ Meal Logging:
                 asyncio.create_task(self._run_tool(self.handle_record_vital(fc_args, fc_id)))
             elif fc.name == "log_patient_activity":
                 asyncio.create_task(self._run_tool(self.handle_log_activity(fc_args, fc_id)))
+            elif fc.name == "contact_doctor":
+                asyncio.create_task(self._run_tool(self.handle_contact_doctor(fc_args, fc_id)))
             elif fc.name == "view_camera":
                 asyncio.create_task(self._run_tool(self.handle_view_camera(fc_args, fc_id)))
             else:
@@ -2261,6 +2316,79 @@ Meal Logging:
             },
         )
         logger.debug(f"[pan] Sent delta={delta} to {group_name}")
+
+    @database_sync_to_async
+    def _save_doctor_query(self, params: dict) -> dict:
+        """Persist a DoctorQuery (see agent.models) for the patient's doctor."""
+        from .models import DoctorQuery
+        from users.models import ClinicalRelationship
+
+        try:
+            patient = PatientProfile.objects.filter(user=self.user).first()
+            if not patient:
+                return {"success": False, "error": "No patient profile found"}
+
+            def choice(value, field, default):
+                value = str(value or "").strip().upper()
+                valid = {c for c, _ in DoctorQuery._meta.get_field(field).choices}
+                return value if value in valid else default
+
+            # The patient's linked doctor account, primary physician first.
+            links = list(
+                ClinicalRelationship.objects.filter(patient=patient, is_active=True)
+                .select_related('doctor')
+            )
+            link = next((r for r in links if r.role == 'PRIMARY'), links[0] if links else None)
+            doctor_name = patient.doctor_name or (link.doctor.get_full_name() if link else "")
+
+            # Supporting context: latest reading per vital, active medicines.
+            vitals = {}
+            for r in (VitalReading.objects.filter(patient=patient, is_deleted=False)
+                      .select_related('vital_type').order_by('-measured_at')[:50]):
+                if r.vital_type.code not in vitals:
+                    vitals[r.vital_type.code] = {
+                        'display': r.get_display_value(),
+                        'measured_at': timezone.localtime(r.measured_at).isoformat(),
+                    }
+            medications = [
+                f"{m.medication_name} {m.dosage} ({m.frequency})"
+                for m in Medication.objects.filter(patient=patient, status='ACTIVE')
+            ]
+
+            query = DoctorQuery.objects.create(
+                patient=patient,
+                session=getattr(self, 'db_session', None),
+                doctor=link.doctor if link else None,
+                doctor_name=doctor_name,
+                kind=choice(params.get('kind'), 'kind', 'QUESTION'),
+                category=choice(params.get('category'), 'category', 'OTHER'),
+                urgency=choice(params.get('urgency'), 'urgency', 'ROUTINE'),
+                subject=str(params.get('subject') or '')[:200],
+                message=str(params.get('message') or ''),
+                patient_words=str(params.get('patient_words') or ''),
+                context={'vitals': vitals, 'medications': medications},
+            )
+            logger.info(f"DoctorQuery created: id={query.id} {query.kind}/{query.urgency} '{query.subject}'")
+            return {
+                "success": True,
+                "query_id": query.id,
+                "doctor": doctor_name or "the patient's doctor",
+                "note": "Saved for the doctor. The doctor replies later through the app, not in this conversation.",
+            }
+        except Exception as e:
+            logger.error(f"Error saving doctor query: {e}", exc_info=True)
+            return {"success": False, "error": str(e)}
+
+    async def handle_contact_doctor(self, args: dict, fc_id):
+        """'contact_doctor' tool: store the question/notification for the doctor."""
+        result = await self._save_doctor_query(args or {})
+        if fc_id and self.session:
+            try:
+                await self.session.send_tool_response(
+                    function_responses=[types.FunctionResponse(id=fc_id, name="contact_doctor", response=result)]
+                )
+            except Exception as exc:
+                logger.error(f"[contact_doctor] Failed to send tool response: {exc}")
 
     async def _request_camera_frame(self, timeout: float = CAMERA_SNAPSHOT_TIMEOUT_S):
         """Ask the app for one fresh camera frame; returns JPEG bytes or None."""

@@ -24,6 +24,13 @@ class PatientProfileAdmin(admin.ModelAdmin):
         ('Health Information', {
             'fields': ('health_conditions', 'allergies', 'current_medications', 'medical_notes', 'last_hospital_visit')
         }),
+        ('Doctor', {
+            'fields': ('doctor_name', 'doctor_specialty', 'doctor_phone', 'doctor_email',
+                       'doctor_clinic', 'doctor_address', 'doctor_notes')
+        }),
+        ('Preferred Pharmacy', {
+            'fields': ('pharmacy_name', 'pharmacy_phone', 'pharmacy_address', 'pharmacy_notes')
+        }),
         ('Preferences', {
             'fields': ('preferred_language', 'personal_notes', 'personal_notes_updated_at', 'stt_keyterms')
         }),

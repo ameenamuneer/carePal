@@ -129,6 +129,23 @@ class PatientProfile(models.Model):
     # Medical History
     medical_notes = models.TextField(blank=True, help_text="Additional medical history or notes")
 
+    # Treating doctor (free-text contact card; the linked doctor *account*, if any,
+    # is users.ClinicalRelationship). Shown to the live AI and used for
+    # doctor queries (agent.DoctorQuery).
+    doctor_name = models.CharField(max_length=200, blank=True)
+    doctor_specialty = models.CharField(max_length=200, blank=True)
+    doctor_phone = models.CharField(max_length=30, blank=True)
+    doctor_email = models.EmailField(blank=True)
+    doctor_clinic = models.CharField(max_length=200, blank=True, help_text="Hospital or clinic name")
+    doctor_address = models.TextField(blank=True)
+    doctor_notes = models.TextField(blank=True, help_text="Consultation hours, how best to reach them, etc.")
+
+    # Preferred pharmacy
+    pharmacy_name = models.CharField(max_length=200, blank=True)
+    pharmacy_phone = models.CharField(max_length=30, blank=True)
+    pharmacy_address = models.TextField(blank=True)
+    pharmacy_notes = models.TextField(blank=True, help_text="Opening hours, home delivery, etc.")
+
     # Personal notes: free text about the person (family, routine, interests,
     # preferences, how they like to be spoken to). Read by the live AI at the
     # start of every session and refreshed by PersonalNotesAgent after each one;

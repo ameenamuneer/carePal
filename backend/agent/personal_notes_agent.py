@@ -151,4 +151,8 @@ class PersonalNotesAgent:
         ]
         if patient.medical_notes:
             lines.append(f"Medical notes: {patient.medical_notes}")
+        if patient.doctor_name:
+            lines.append(f"Doctor: {patient.doctor_name} {patient.doctor_phone}".strip())
+        if patient.pharmacy_name:
+            lines.append(f"Preferred pharmacy: {patient.pharmacy_name} {patient.pharmacy_phone}".strip())
         return "\n".join(lines)

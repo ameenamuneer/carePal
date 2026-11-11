@@ -5,7 +5,8 @@ from .models import (
     AgentAction,
     AgentMemory,
     AgentEventLog,
-    AgentCacheEntry
+    AgentCacheEntry,
+    DoctorQuery,
 )
 
 @admin.register(AgentSession)
@@ -43,3 +44,11 @@ class AgentEventLogAdmin(admin.ModelAdmin):
 class AgentCacheEntryAdmin(admin.ModelAdmin):
     list_display = ['cache_key', 'patient', 'hit_count', 'cost_saved_usd', 'expires_at']
     readonly_fields = ['created_at', 'hit_count', 'cost_saved_usd']
+
+
+@admin.register(DoctorQuery)
+class DoctorQueryAdmin(admin.ModelAdmin):
+    list_display = ['created_at', 'patient', 'doctor_name', 'kind', 'category', 'urgency', 'status', 'subject']
+    list_filter = ['status', 'kind', 'urgency', 'category']
+    search_fields = ['subject', 'message', 'patient_words']
+    readonly_fields = ['created_at', 'updated_at']

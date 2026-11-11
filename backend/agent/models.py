@@ -658,6 +658,92 @@ class PendingQuestion(models.Model):
         return f"[{self.source}] {self.question[:60]}"
 
 
+
+class DoctorQuery(models.Model):
+    """
+    A question or notification for the patient's doctor, raised by the live AI
+    ('contact_doctor' tool). Stored here for the doctors app to read and answer;
+    a doctor's reply can be relayed to the patient in their next session with a
+    PendingQuestion(source='DOCTOR').
+    """
+    KIND_CHOICES = [
+        ('QUESTION', 'Question for the doctor'),
+        ('NOTIFICATION', 'Notification (for information)'),
+    ]
+    CATEGORY_CHOICES = [
+        ('MEDICATION', 'Medication'),
+        ('SYMPTOM', 'Symptom'),
+        ('VITALS', 'Vitals'),
+        ('APPOINTMENT', 'Appointment'),
+        ('OTHER', 'Other'),
+    ]
+    URGENCY_CHOICES = [
+        ('ROUTINE', 'Routine'),
+        ('SOON', 'Soon (within a day)'),
+        ('URGENT', 'Urgent'),
+    ]
+    STATUS_CHOICES = [
+        ('PENDING', 'Pending'),
+        ('READ', 'Read by doctor'),
+        ('ANSWERED', 'Answered'),
+        ('CLOSED', 'Closed'),
+    ]
+
+    patient = models.ForeignKey(
+        'patients.PatientProfile',
+        on_delete=models.CASCADE,
+        related_name='doctor_queries',
+    )
+    session = models.ForeignKey(
+        'AgentSession',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='doctor_queries',
+    )
+    # The patient's linked doctor account (users.ClinicalRelationship), if any,
+    # plus a snapshot of the doctor named on the profile at the time.
+    doctor = models.ForeignKey(
+        'users.User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='doctor_queries',
+        limit_choices_to={'user_type': 'DOCTOR'},
+    )
+    doctor_name = models.CharField(max_length=200, blank=True)
+
+    kind = models.CharField(max_length=20, choices=KIND_CHOICES, default='QUESTION')
+    category = models.CharField(max_length=20, choices=CATEGORY_CHOICES, default='OTHER')
+    urgency = models.CharField(max_length=10, choices=URGENCY_CHOICES, default='ROUTINE')
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='PENDING')
+
+    subject = models.CharField(max_length=200)
+    message = models.TextField(help_text="The question or update, written for the doctor.")
+    patient_words = models.TextField(
+        blank=True,
+        help_text="What the patient actually said, in their own words.",
+    )
+    context = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Supporting data at the time (latest vitals, active medications).",
+    )
+
+    response = models.TextField(blank=True, help_text="The doctor's reply.")
+    responded_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['patient', 'status', '-created_at'])]
+
+    def __str__(self):
+        return f"[{self.kind}/{self.urgency}] {self.subject} – {self.patient}"
+
+
 class NutritionLog(models.Model):
     MEAL_TYPE_CHOICES = [
         ('BREAKFAST', 'Breakfast'),

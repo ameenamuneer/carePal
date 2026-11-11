@@ -39,6 +39,7 @@ def build_keyterms(patient) -> list:
         user = patient.user
         terms += [user.get_full_name(), user.first_name, user.last_name]
         terms += [patient.city, patient.state]
+        terms += [patient.doctor_name, patient.doctor_clinic, patient.pharmacy_name]
         terms += [str(c) for c in patient.health_conditions or []]
         terms += [str(a) for a in patient.allergies or []]
         terms += list(Medication.objects.filter(patient=patient).values_list('medication_name', flat=True))

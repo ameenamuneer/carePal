@@ -47,6 +47,9 @@ class PatientProfileSerializer(serializers.ModelSerializer):
             'preferred_language', 'health_conditions', 'allergies',
             'current_medications', 'medical_notes', 'last_hospital_visit',
             'personal_notes', 'personal_notes_updated_at', 'stt_keyterms',
+            'doctor_name', 'doctor_specialty', 'doctor_phone', 'doctor_email',
+            'doctor_clinic', 'doctor_address', 'doctor_notes',
+            'pharmacy_name', 'pharmacy_phone', 'pharmacy_address', 'pharmacy_notes',
             'emergency_contacts', 'age', 'is_active',
             'created_at', 'updated_at'
         ]
