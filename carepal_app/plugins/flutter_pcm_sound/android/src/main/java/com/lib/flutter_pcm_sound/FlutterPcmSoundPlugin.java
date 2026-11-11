@@ -35,7 +35,26 @@ public class FlutterPcmSoundPlugin implements
         FlutterPlugin,
         MethodChannel.MethodCallHandler {
     private static final String CHANNEL_NAME = "flutter_pcm_sound/methods";
-    private static final int MAX_FRAMES_PER_BUFFER = 200;
+
+    // ── Jitter buffer ────────────────────────────────────────────────────────
+    // Network audio arrives in bursts (phone ↔ ngrok jitter of 100–500 ms was
+    // measured). Starting playback on the first chunk with only the minimal
+    // AudioTrack buffer turned every delivery gap into an underrun: choppy,
+    // "robotic" audio until the next burst caught up. Playback now (re)starts
+    // only once mPrebufferMs of audio is queued, or after waiting that long, so
+    // a gap shorter than the buffer is inaudible and a longer one becomes a
+    // clean pause. The target adapts: an underrun mid-reply raises it by
+    // PREBUFFER_STEP_MS (up to MAX); CLEAN_REPLIES_TO_DECAY replies without one
+    // lower it again (down to MIN), so a good connection keeps the delay small.
+    private static final int PREBUFFER_MIN_MS = 100;
+    private static final int PREBUFFER_MAX_MS = 400;
+    private static final int PREBUFFER_STEP_MS = 100;
+    private static final int CLEAN_REPLIES_TO_DECAY = 3;
+    // Audio arriving this soon after the queue ran dry means the reply was still
+    // going (an underrun); later than this, the previous reply had ended.
+    private static final long UNDERRUN_GAP_MS = 1000;
+    // Samples are queued and written to the AudioTrack in pieces of this length.
+    private static final int WRITE_CHUNK_MS = 20;
 
     private MethodChannel mMethodChannel;
     private Handler mainThreadHandler = new Handler(Looper.getMainLooper());
@@ -43,6 +62,7 @@ public class FlutterPcmSoundPlugin implements
     private volatile boolean mShouldCleanup = false;
 
     private AudioTrack mAudioTrack;
+    private int mSampleRate;
     private int mNumChannels;
     private int mMinBufferSize;
     private boolean mDidSetup = false;
@@ -55,6 +75,15 @@ public class FlutterPcmSoundPlugin implements
 
     // Thread-safe queue for storing audio samples
     private final LinkedBlockingQueue<ByteBuffer> mSamples = new LinkedBlockingQueue<>();
+    // Bytes currently queued (kept as a running total; guarded by mSamples).
+    private long mQueuedBytes = 0;
+    // Set by clear(): the playback thread also drops audio already in the AudioTrack.
+    private volatile boolean mFlushRequested = false;
+
+    // Adaptive jitter-buffer state (playback thread only).
+    private int mPrebufferMs = PREBUFFER_MIN_MS;
+    private int mCleanReplies = 0;
+    private boolean mUnderrunThisReply = false;
 
     // Log level enum (kept for potential future use)
     private enum LogLevel {
@@ -91,6 +120,7 @@ public class FlutterPcmSoundPlugin implements
                 }
                 case "setup": {
                     int sampleRate = call.argument("sample_rate");
+                    mSampleRate = sampleRate;
                     mNumChannels = call.argument("num_channels");
 
                     // Cleanup existing resources if any
@@ -190,7 +220,11 @@ public class FlutterPcmSoundPlugin implements
                     }
 
                     // reset
-                    mSamples.clear();
+                    synchronized (mSamples) {
+                        mSamples.clear();
+                        mQueuedBytes = 0;
+                    }
+                    mFlushRequested = false;
                     mShouldCleanup = false;
 
                     // start playback thread
@@ -213,15 +247,20 @@ public class FlutterPcmSoundPlugin implements
 
                     byte[] buffer = call.argument("buffer");
 
-                    // Split for better performance
-                    List<ByteBuffer> chunks = split(buffer, MAX_FRAMES_PER_BUFFER);
+                    // Split into WRITE_CHUNK_MS pieces (whole frames)
+                    int frameBytes = 2 * mNumChannels;
+                    int chunkBytes = Math.max(frameBytes,
+                            (mSampleRate * WRITE_CHUNK_MS / 1000) * frameBytes);
+                    List<ByteBuffer> chunks = split(buffer, chunkBytes);
 
-                    // Push samples
+                    // Push samples and wake the playback thread
                     synchronized (mSamples) {
                         for (ByteBuffer chunk : chunks) {
                             mSamples.add(chunk);
                         }
+                        mQueuedBytes += buffer.length;
                         mTotalFeeds += 1;
+                        mSamples.notifyAll();
                     }
 
                     result.success(true);
@@ -232,6 +271,11 @@ public class FlutterPcmSoundPlugin implements
                     // re-requesting audio focus. Safe to call from interrupt handler.
                     synchronized (mSamples) {
                         mSamples.clear();
+                        mQueuedBytes = 0;
+                        // Also drop what is already inside the AudioTrack, or
+                        // the interrupted speech keeps playing for a moment.
+                        mFlushRequested = true;
+                        mSamples.notifyAll();
                     }
                     result.success(true);
                     break;
@@ -294,25 +338,83 @@ public class FlutterPcmSoundPlugin implements
     }
 
     /**
-     * The main loop of the playback thread.
+     * The main loop of the playback thread: an adaptive jitter buffer in front
+     * of the AudioTrack (see PREBUFFER_* above).
      */
     private void playbackThreadLoop() {
         android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO);
 
         mAudioTrack.play();
 
+        final long bytesPerMs = (long) mSampleRate * 2 * mNumChannels / 1000;
+        boolean buffering = true;   // waiting to (re)start playback
+        long drainedAt = 0;         // when the queue last ran dry mid-playback (0 = idle)
+
         while (!mShouldCleanup) {
-            ByteBuffer data = null;
-            try {
-                // blocks indefinitely until new data
-                data = mSamples.take();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+            if (mFlushRequested) {
+                // Interrupt (clear): discard audio already handed to the AudioTrack.
+                mFlushRequested = false;
+                mAudioTrack.pause();
+                mAudioTrack.flush();
+                mAudioTrack.play();
+                buffering = true;
+                drainedAt = 0;
+                mUnderrunThisReply = false;  // an interrupted reply says nothing about the network
+            }
+
+            if (buffering) {
+                long queued;
+                synchronized (mSamples) {
+                    queued = mQueuedBytes;
+                    if (queued == 0 && !mFlushRequested && !mShouldCleanup) {
+                        try {
+                            // Idle: sleep until fed. Mid-reply: wake to notice the reply ended.
+                            mSamples.wait(drainedAt > 0 ? 50 : 1000);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                        queued = mQueuedBytes;
+                    }
+                }
+                long now = SystemClock.elapsedRealtime();
+                if (queued == 0) {
+                    if (drainedAt > 0 && now - drainedAt > UNDERRUN_GAP_MS) {
+                        onReplyEnded();
+                        drainedAt = 0;
+                    }
+                    continue;
+                }
+                if (drainedAt > 0) {
+                    // Audio ran out mid-reply and has resumed: the buffer was too small.
+                    onUnderrun();
+                    drainedAt = 0;
+                }
+                // Prebuffer: until mPrebufferMs is queued, or for at most that long.
+                long targetBytes = mPrebufferMs * bytesPerMs;
+                long deadline = now + mPrebufferMs;
+                synchronized (mSamples) {
+                    while (!mShouldCleanup && !mFlushRequested && mQueuedBytes < targetBytes) {
+                        long left = deadline - SystemClock.elapsedRealtime();
+                        if (left <= 0) break;
+                        try {
+                            mSamples.wait(Math.min(left, 20));
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            break;
+                        }
+                    }
+                }
+                buffering = false;
                 continue;
             }
 
-            // write
-            mAudioTrack.write(data, data.remaining(), AudioTrack.WRITE_BLOCKING);
+            ByteBuffer data = mSamples.poll();
+            if (data == null) {
+                // Ran dry: buffer up again before resuming.
+                buffering = true;
+                drainedAt = SystemClock.elapsedRealtime();
+                continue;
+            }
 
             long remainingFrames;
             long totalFeeds;
@@ -320,14 +422,14 @@ public class FlutterPcmSoundPlugin implements
 
             // grab shared data
             synchronized (mSamples) {
-                long totalBytes = 0;
-                for (ByteBuffer sampleBuffer : mSamples) {
-                    totalBytes += sampleBuffer.remaining();
-                }
-                remainingFrames = totalBytes / (2 * mNumChannels);
+                mQueuedBytes = Math.max(0, mQueuedBytes - data.remaining());
+                remainingFrames = mQueuedBytes / (2 * mNumChannels);
                 totalFeeds = mTotalFeeds;
                 feedThreshold = mFeedThreshold;
             }
+
+            // write
+            mAudioTrack.write(data, data.remaining(), AudioTrack.WRITE_BLOCKING);
 
             // check for events
             boolean isLowBufferEvent = (remainingFrames <= feedThreshold) && (mLastLowBufferFeed != totalFeeds);
@@ -341,7 +443,8 @@ public class FlutterPcmSoundPlugin implements
                 if (isZeroCrossingEvent) {
                     mLastZeroFeed = totalFeeds;
                 }
-                mainThreadHandler.post(() -> invokeFeedCallback(remainingFrames));
+                final long frames = remainingFrames;
+                mainThreadHandler.post(() -> invokeFeedCallback(frames));
             }
         }
 
@@ -349,6 +452,28 @@ public class FlutterPcmSoundPlugin implements
         mAudioTrack.flush();
         mAudioTrack.release();
         mAudioTrack = null;
+    }
+
+    private void onUnderrun() {
+        mUnderrunThisReply = true;
+        mCleanReplies = 0;
+        if (mPrebufferMs < PREBUFFER_MAX_MS) {
+            mPrebufferMs = Math.min(PREBUFFER_MAX_MS, mPrebufferMs + PREBUFFER_STEP_MS);
+        }
+        android.util.Log.d("FlutterPcmSound", "underrun → prebuffer " + mPrebufferMs + " ms");
+    }
+
+    private void onReplyEnded() {
+        if (mUnderrunThisReply) {
+            mUnderrunThisReply = false;
+            return;
+        }
+        mCleanReplies += 1;
+        if (mCleanReplies >= CLEAN_REPLIES_TO_DECAY && mPrebufferMs > PREBUFFER_MIN_MS) {
+            mPrebufferMs = Math.max(PREBUFFER_MIN_MS, mPrebufferMs - PREBUFFER_STEP_MS);
+            mCleanReplies = 0;
+            android.util.Log.d("FlutterPcmSound", "clean replies → prebuffer " + mPrebufferMs + " ms");
+        }
     }
 
     private List<ByteBuffer> split(byte[] buffer, int maxSize) {

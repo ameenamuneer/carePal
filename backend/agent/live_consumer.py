@@ -61,7 +61,7 @@ OUTPUT_RATE = 24000
 #     (handled like an empty turn → re-prompt once);
 #   • the server goes quiet for TURN_STALL_MS mid-turn.
 TURN_GEN_DONE_GRACE_MS = 1500
-TURN_PLAYBACK_MARGIN_MS = 500   # client-side buffering slack on the playback estimate
+TURN_PLAYBACK_MARGIN_MS = 1000  # client-side buffering slack: the app's jitter buffer delays playback by 100–400 ms
 TURN_NO_RESPONSE_MS    = 10000
 TURN_STALL_MS          = 20000
 # Tool calls: 3.x sends turn_complete right after a tool call, BEFORE we answer

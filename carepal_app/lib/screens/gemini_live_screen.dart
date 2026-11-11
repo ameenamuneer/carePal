@@ -134,6 +134,9 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
       // FlutterPcmSound.setup sets MODE_IN_COMMUNICATION and USAGE_VOICE_COMMUNICATION
       // on Android, which is the prerequisite for hardware AEC to function.
       await FlutterPcmSound.setup(sampleRate: 24000, channelCount: 1);
+      // The plugin's default log level prints a line per audio chunk on the UI
+      // thread, which competes with playback on slower phones.
+      await FlutterPcmSound.setLogLevel(LogLevel.none);
 
       // When the playback buffer fully drains the AI has finished speaking.
       // A 500 ms debounce absorbs brief inter-packet gaps in streamed responses.
@@ -253,12 +256,11 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
     if (message is! Uint8List) return;
     final typeByte = message[0];
     if (typeByte == 0x00) {
-      // Copy to guarantee 2-byte alignment before viewing as Int16List
-      final raw = message.sublist(1);
-      final aligned = Uint8List.fromList(
-          raw.length % 2 == 0 ? raw : raw.sublist(0, raw.length - 1));
-      final int16List = aligned.buffer.asInt16List();
-      FlutterPcmSound.feed(PcmArrayInt16.fromList(int16List));
+      // Hand the PCM bytes (after the type byte, whole samples only) to the
+      // player as a view of the message: no copies on the UI thread.
+      final pcmLen = (message.length - 1) & ~1;
+      FlutterPcmSound.feed(
+          PcmArrayInt16(bytes: ByteData.sublistView(message, 1, 1 + pcmLen)));
       _speakingTimer?.cancel(); // new audio arriving — cancel any pending drain debounce
       _setSpeaking(true);
     } else if (typeByte == 0x03) {

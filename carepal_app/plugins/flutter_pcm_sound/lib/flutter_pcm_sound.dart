@@ -53,7 +53,12 @@ class FlutterPcmSound {
   /// queue 16-bit samples (little endian)
   static Future<void> feed(PcmArrayInt16 buffer) async {
     if (_needsStart && buffer.count != 0) _needsStart = false;
-    return await _invokeMethod('feed', {'buffer': buffer.bytes.buffer.asUint8List()});
+    // Send exactly this array's bytes: `bytes` may be a view into a larger
+    // buffer (e.g. a received network message), so honour its offset/length.
+    final data = buffer.bytes;
+    return await _invokeMethod('feed', {
+      'buffer': data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes)
+    });
   }
 
   /// set the threshold at which we call the
