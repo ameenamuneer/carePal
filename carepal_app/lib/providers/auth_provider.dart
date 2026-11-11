@@ -1,15 +1,32 @@
+import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../services/api_service.dart';
 import '../services/auth_service.dart';
 
 class AuthProvider with ChangeNotifier {
   final AuthService _authService = AuthService();
+  final ApiService _api = ApiService();
+
+  // Cached user payload (same shape as the login response's 'user'), so a
+  // restored session shows the dashboard immediately, even offline.
+  static const _userCacheKey = 'auth_user';
 
   bool _isAuthenticated = false;
+  bool _isInitializing = true;
   bool _isLoading = false;
   Map<String, dynamic>? _user;
   String? _errorMessage;
 
+  AuthProvider() {
+    _api.onSessionExpired = _handleSessionExpired;
+  }
+
   bool get isAuthenticated => _isAuthenticated;
+
+  /// True until restoreSession() has decided whether a saved login exists.
+  bool get isInitializing => _isInitializing;
   bool get isLoading => _isLoading;
   Map<String, dynamic>? get user => _user;
   String? get errorMessage => _errorMessage;
@@ -28,6 +45,7 @@ class AuthProvider with ChangeNotifier {
 
       // Update state
       _user = data['user'];
+      await _cacheUser(_user);
       _isAuthenticated = true;
       _errorMessage = null;
       notifyListeners();
@@ -63,6 +81,7 @@ class AuthProvider with ChangeNotifier {
       await _authService.saveTokens(tokens['access'], tokens['refresh']);
 
       _user = data['user'];
+      await _cacheUser(_user);
       _isAuthenticated = true;
       _errorMessage = null;
       notifyListeners();
@@ -89,7 +108,77 @@ class AuthProvider with ChangeNotifier {
     }
     _isAuthenticated = false;
     _user = null;
+    await _cacheUser(null);
     notifyListeners();
+  }
+
+  /// Restore a saved login on app start. If the stored session can still be
+  /// renewed, go straight to the app (using the cached user), make sure the
+  /// access token is fresh, and reload the user profile in the background.
+  Future<void> restoreSession() async {
+    try {
+      if (await _api.hasSession()) {
+        _user = await _loadCachedUser();
+        _isAuthenticated = true;
+        // Renew an expired access token now so the first requests and the
+        // live socket start with a valid one. If the server rejects the
+        // session, onSessionExpired flips us back to logged out.
+        await _api.getValidAccessToken();
+        if (_isAuthenticated) {
+          if (_user == null) {
+            // No cached user yet (logged in before this version): wait for it,
+            // screens read the patient id from it.
+            await _refreshUser().timeout(const Duration(seconds: 10), onTimeout: () {});
+          } else {
+            unawaited(_refreshUser());
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('Session restore failed: $e');
+    } finally {
+      _isInitializing = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _refreshUser() async {
+    try {
+      final profile = await _authService.getProfile();
+      _user = profile;
+      await _cacheUser(profile);
+      notifyListeners();
+    } catch (_) {
+      // Offline or server error: keep the cached user.
+    }
+  }
+
+  void _handleSessionExpired() {
+    if (!_isAuthenticated && _user == null) return;
+    _isAuthenticated = false;
+    _user = null;
+    unawaited(_cacheUser(null));
+    notifyListeners();
+  }
+
+  Future<Map<String, dynamic>?> _loadCachedUser() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_userCacheKey);
+    if (raw == null) return null;
+    try {
+      return jsonDecode(raw) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _cacheUser(Map<String, dynamic>? user) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (user == null) {
+      await prefs.remove(_userCacheKey);
+    } else {
+      await prefs.setString(_userCacheKey, jsonEncode(user));
+    }
   }
 
   // Check initial auth state (e.g. on app start)

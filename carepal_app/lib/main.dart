@@ -42,7 +42,7 @@ void main() async {
             ChangeNotifierProvider(
               create: (_) {
                 print("📦 [DEBUG] Init AuthProvider");
-                return AuthProvider();
+                return AuthProvider()..restoreSession();
               },
             ),
             ChangeNotifierProvider(create: (_) => DashboardProvider()),
@@ -82,6 +82,13 @@ class CarePalApp extends StatelessWidget {
       theme: AppTheme.lightTheme,
       home: Consumer<AuthProvider>(
         builder: (context, auth, _) {
+          // Wait for the saved login to be restored instead of flashing the
+          // login screen on every launch.
+          if (auth.isInitializing) {
+            return const Scaffold(
+              body: Center(child: CircularProgressIndicator()),
+            );
+          }
           return auth.isAuthenticated
               ? const DashboardScreen()
               : const LoginScreen();

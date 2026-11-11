@@ -46,10 +46,11 @@ class PatientProfileSerializer(serializers.ModelSerializer):
             'pincode', 'country', 'full_address',
             'preferred_language', 'health_conditions', 'allergies',
             'current_medications', 'medical_notes', 'last_hospital_visit',
+            'personal_notes', 'personal_notes_updated_at',
             'emergency_contacts', 'age', 'is_active',
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'personal_notes_updated_at', 'created_at', 'updated_at']
     
     def get_age(self, obj):
         """Get age from user's date of birth"""

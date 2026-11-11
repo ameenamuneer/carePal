@@ -34,6 +34,9 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
   WebSocketChannel? _channel;
   bool _isConnected = false;
   bool _isDisposed = false;
+  // Close code the backend uses when the login token is missing or invalid.
+  static const int _kAuthFailedCloseCode = 4001;
+  bool _authRetried = false;
 
   // --- Audio ---
   final AecRecorder _aecRecorder = AecRecorder();
@@ -45,7 +48,13 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
 
   // --- Camera / edge tracking ---
   CameraController? _cameraController;
+  // Camera button: shows the preview AND turns the live camera feed to the AI
+  // on/off (frames at _geminiFrameFps). The backend forwards frames to Gemini
+  // only while this is on.
   bool _camVisible = false;
+  // Set when the AI asks for a single snapshot ('view_camera'); the next camera
+  // frame is sent even if the live feed is off.
+  bool _captureRequested = false;
 
   // On-device detectors: faces are the primary tracking target; object
   // detection is the fallback when no face is present.
@@ -55,7 +64,7 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
   // Two INDEPENDENT, backend-configurable capture rates. Seeded here and
   // overwritten by the backend's {"type":"config"} message on connect.
   int _detectionFps = 6;      // on-device detection + track_offset send (Hz)
-  int _geminiFrameFps = 0;    // JPEG frames sent to Gemini for vision (0 = off)
+  int _geminiFrameFps = 0;    // JPEG frame rate while the camera feed is on (0 = off)
   double _minConf = 0.5;      // confidence filter (object fallback only)
   bool _edgeTracking = true;
 
@@ -201,22 +210,37 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
     if (!wsUrl.startsWith('ws')) wsUrl = 'ws://$wsUrl';
     wsUrl = '$wsUrl/ws/agent/live/';
 
-    final token = await ApiService().getAccessToken();
+    // Refreshes the token first if it has expired (tokens last 1 hour).
+    final token = await ApiService().getValidAccessToken();
     if (token != null) wsUrl = '$wsUrl?token=$token';
 
     try {
-      _channel = IOWebSocketChannel.connect(Uri.parse(wsUrl));
+      final channel = IOWebSocketChannel.connect(Uri.parse(wsUrl));
+      _channel = channel;
       _isConnected = true;
       if (mounted) setState(() { _statusText = 'listening'; });
+      // A new connection starts with the feed off on the backend: resync.
+      _sendCameraFeedState();
 
-      _channel!.stream.listen(
+      channel.stream.listen(
         _handleMessage,
         onError: (_) {
           _isConnected = false;
           if (mounted) setState(() { _statusText = 'disconnected'; });
         },
-        onDone: () {
+        onDone: () async {
           _isConnected = false;
+          // The backend rejected our login (close code 4001): refresh the
+          // token and reconnect once.
+          if (channel.closeCode == _kAuthFailedCloseCode &&
+              !_authRetried &&
+              !_isDisposed) {
+            _authRetried = true;
+            if (await ApiService().refreshAccessToken() && !_isDisposed) {
+              await _connectWebSocket();
+              return;
+            }
+          }
           if (mounted) setState(() { _statusText = 'disconnected'; });
         },
       );
@@ -243,6 +267,7 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
       final data = jsonDecode(utf8.decode(message.sublist(1)));
       if (data['type'] == 'interrupted') _interruptAudio();
       if (data['type'] == 'config') _applyConfig(data);
+      if (data['type'] == 'capture_frame') _captureRequested = true;
       if (data['type'] == 'text') {
         if (mounted) setState(() {
           _tickerText = data['content'] ?? '';
@@ -344,9 +369,10 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
     if (mounted) setState(() {});
   }
 
-  // Single camera stream feeds two INDEPENDENT rate-gated consumers:
+  // Single camera stream feeds two INDEPENDENT consumers:
   //   • edge detection  → track_offset (runs at _detectionFps)
-  //   • Gemini vision    → JPEG frame   (runs at _geminiFrameFps, 0 = off)
+  //   • Gemini vision    → JPEG frame: one on demand (snapshot request), or
+  //     continuously at _geminiFrameFps while the camera button is on
   void _onCameraImage(CameraImage image) {
     if (_isDisposed || !_isConnected) return;
     final now = DateTime.now();
@@ -359,7 +385,13 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
       _runDetection(image);
     }
 
-    if (_geminiFrameFps > 0 &&
+    if (_captureRequested && !_isEncodingFrame) {
+      _captureRequested = false;
+      _lastGeminiFrame = now;
+      _sendGeminiFrame(image);
+      _showSnapshotNotice();
+    } else if (_camVisible &&
+        _geminiFrameFps > 0 &&
         !_isEncodingFrame &&
         now.difference(_lastGeminiFrame).inMilliseconds >= 1000 ~/ _geminiFrameFps) {
       _lastGeminiFrame = now;
@@ -484,7 +516,31 @@ class _GeminiLiveScreenState extends State<GeminiLiveScreen>
     if (!_micOn) _currentRms = 0;
   });
 
-  void _toggleCam() => setState(() { _camVisible = !_camVisible; });
+  void _toggleCam() {
+    setState(() { _camVisible = !_camVisible; });
+    _sendCameraFeedState();
+  }
+
+  // Tells the backend whether to forward camera frames to Gemini.
+  void _sendCameraFeedState() {
+    if (_channel == null || !_isConnected || _isDisposed) return;
+    final body = utf8.encode(jsonEncode({'type': 'camera_feed', 'enabled': _camVisible}));
+    final payload = Uint8List(body.length + 1);
+    payload[0] = 0x02;
+    payload.setRange(1, payload.length, body);
+    _channel!.sink.add(payload);
+  }
+
+  // A snapshot is never taken silently: show a brief notice.
+  void _showSnapshotNotice() {
+    if (!mounted) return;
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      const SnackBar(
+        content: Text('📷 CarePal took a photo to take a look'),
+        duration: Duration(seconds: 2),
+      ),
+    );
+  }
 
   @override
   void dispose() {

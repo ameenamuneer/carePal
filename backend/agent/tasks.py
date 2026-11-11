@@ -44,3 +44,24 @@ def process_nutrition_log(self, activity_log_id: int):
     except Exception as exc:
         logger.error(f"process_nutrition_log failed: {exc}")
         raise self.retry(exc=exc)
+
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=30)
+def update_personal_notes(self, patient_id: int, since_iso: str):
+    """
+    Triggered when a live AI session ends. Calls PersonalNotesAgent to fold the
+    session's conversation into PatientProfile.personal_notes.
+    """
+    try:
+        from datetime import datetime
+        from patients.models import PatientProfile
+        patient = PatientProfile.objects.select_related('user').get(id=patient_id)
+
+        from .personal_notes_agent import PersonalNotesAgent
+        PersonalNotesAgent().process(patient, datetime.fromisoformat(since_iso))
+
+    except PatientProfile.DoesNotExist:
+        logger.warning(f"update_personal_notes: patient {patient_id} not found")
+    except Exception as exc:
+        logger.error(f"update_personal_notes failed: {exc}")
+        raise self.retry(exc=exc)

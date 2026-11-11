@@ -40,6 +40,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist',
     'drf_yasg',
     'django_filters',
     'corsheaders',
@@ -162,8 +163,12 @@ REST_FRAMEWORK = {
 from datetime import timedelta
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(hours=1),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    # Sliding session: every refresh issues a new refresh token (the app keeps
+    # it), so the app stays logged in while used at least once a month.
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
     'ROTATE_REFRESH_TOKENS': True,
+    # Old refresh tokens stop working once rotated, and logout really revokes.
+    'BLACKLIST_AFTER_ROTATION': True,
 }
 
 # Celery Configuration

@@ -128,6 +128,16 @@ class PatientProfile(models.Model):
     
     # Medical History
     medical_notes = models.TextField(blank=True, help_text="Additional medical history or notes")
+
+    # Personal notes: free text about the person (family, routine, interests,
+    # preferences, how they like to be spoken to). Read by the live AI at the
+    # start of every session and refreshed by PersonalNotesAgent after each one;
+    # caregivers can edit it too. Kept short (see PERSONAL_NOTES_MAX_CHARS).
+    personal_notes = models.TextField(
+        blank=True,
+        help_text="Personal notes about the patient, maintained by the AI after each session and editable by caregivers"
+    )
+    personal_notes_updated_at = models.DateTimeField(null=True, blank=True)
     last_hospital_visit = models.DateField(null=True, blank=True)
 
     # Nutrition tracking

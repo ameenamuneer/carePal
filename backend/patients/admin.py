@@ -9,7 +9,7 @@ class PatientProfileAdmin(admin.ModelAdmin):
     ]
     list_filter = ['gender', 'blood_group', 'preferred_language', 'is_active', 'state']
     search_fields = ['user__first_name', 'user__last_name', 'user__phone_number', 'city']
-    readonly_fields = ['created_at', 'updated_at', 'bmi', 'bmi_category']
+    readonly_fields = ['created_at', 'updated_at', 'bmi', 'bmi_category', 'personal_notes_updated_at']
     
     fieldsets = (
         ('User Information', {
@@ -25,7 +25,7 @@ class PatientProfileAdmin(admin.ModelAdmin):
             'fields': ('health_conditions', 'allergies', 'current_medications', 'medical_notes', 'last_hospital_visit')
         }),
         ('Preferences', {
-            'fields': ('preferred_language',)
+            'fields': ('preferred_language', 'personal_notes', 'personal_notes_updated_at')
         }),
         ('Status', {
             'fields': ('is_active', 'created_at', 'updated_at')

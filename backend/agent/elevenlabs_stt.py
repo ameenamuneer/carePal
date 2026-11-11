@@ -3,7 +3,11 @@ ElevenLabs Scribe speech-to-text (prerecorded / utterance upload).
 
 Wraps a finished utterance's 16 kHz mono PCM16 in a WAV container and POSTs it
 to the ElevenLabs speech-to-text endpoint. Automatic language detection is
-achieved by OMITTING `language_code` entirely.
+achieved by OMITTING `language_code` entirely. Passing `language_code` is only a
+hint, not a lock: on normal-length utterances Scribe still transcribes other
+languages correctly, but on very short (~1s) clips the hint largely decides the
+language, which is what keeps barge-in snippets from being misread as Tamil etc.
+Note that when a hint is sent, the response's `language_code` just echoes it.
 
 Endpoint: POST https://api.elevenlabs.io/v1/speech-to-text
 Auth:     xi-api-key: <ELEVENLABS_API_KEY>
@@ -59,6 +63,7 @@ def transcribe_elevenlabs(
     timeout: float = 20.0,
     api_key: Optional[str] = None,
     tag_audio_events: bool = True,
+    language_code: Optional[str] = None,
 ) -> str:
     """
     Transcribe a finished utterance. Blocking (uses `requests`); call via
@@ -68,6 +73,8 @@ def transcribe_elevenlabs(
     non-speech events like "[Background noise]". Set it False when the transcript
     is used only to decide whether real speech is present (e.g. barge-in gating),
     so noise yields an empty string instead of a bracket tag.
+
+    `language_code` (ISO-639-3, e.g. "mal") is an optional language hint.
     """
     key = api_key or get_elevenlabs_key()
     if not key:
@@ -81,6 +88,8 @@ def transcribe_elevenlabs(
         "model_id": model_id,
         "tag_audio_events": "true" if tag_audio_events else "false",
     }
+    if language_code:
+        data["language_code"] = language_code
     files = {"file": ("audio.wav", wav, "audio/wav")}
 
     # Do NOT set Content-Type manually — requests sets the multipart boundary.

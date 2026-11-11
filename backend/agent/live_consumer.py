@@ -6,6 +6,7 @@ import time
 import logging
 import asyncio
 import base64
+import unicodedata
 from collections import deque
 import numpy as np
 from channels.generic.websocket import AsyncWebsocketConsumer
@@ -29,9 +30,49 @@ from agent.elevenlabs_stt import transcribe_elevenlabs
 
 logger = logging.getLogger(__name__)
 
-# Configure the model
-# Configure the model
-MODEL = "models/gemini-2.5-flash-native-audio-preview-12-2025"
+# Configure the model. Previously "models/gemini-2.5-flash-native-audio-preview-12-2025";
+# 3.8 Live replies ~3x faster (0.6–1.7s vs 3–5s) and interrupts natively, for
+# ~40% more per conversation (measured 2026-11-10).
+MODEL = "models/gemini-3.8-live"
+
+# How a barge-in interrupts the model's generation server-side. Measured:
+#   • 2.5 native audio ignores a new client turn sent mid-generation (it keeps
+#     talking) unless it is preceded by activity_start/activity_end, which yields
+#     an immediate `interrupted`. The pair must be sent TOGETHER with the new text:
+#     an empty activity_start/end makes 2.5 silently resume its previous reply.
+#   • 3.x Live models interrupt on the client turn alone, and reject the
+#     activity signals (1007 "Precondition check failed").
+INTERRUPT_WITH_ACTIVITY_SIGNALS = "2.5" in MODEL
+
+# Model output audio format (PCM16 mono), used to estimate client playback time.
+OUTPUT_RATE = 24000
+
+# ── Turn tracking ─────────────────────────────────────────────────────────────
+# A turn opens when we send a message and closes when the model has finished
+# replying. `turn_complete` alone is not a reliable close signal: after a tool
+# call, Gemini often withholds it until the NEXT message is sent, where it then
+# arrives (<2s after the send, before any new output) and belongs to the OLD
+# turn. A turn_complete with no model activity since our send is therefore
+# treated as stale and ignored. To never leave the user unable to speak, the VAD
+# ticker also closes a turn when:
+#   • generation_complete arrived, the server has been quiet for
+#     TURN_GEN_DONE_GRACE_MS, and the client should have finished playing it;
+#   • the model shows no activity at all for TURN_NO_RESPONSE_MS after a send
+#     (handled like an empty turn → re-prompt once);
+#   • the server goes quiet for TURN_STALL_MS mid-turn.
+TURN_GEN_DONE_GRACE_MS = 1500
+TURN_PLAYBACK_MARGIN_MS = 500   # client-side buffering slack on the playback estimate
+TURN_NO_RESPONSE_MS    = 10000
+TURN_STALL_MS          = 20000
+# Tool calls: 3.x sends turn_complete right after a tool call, BEFORE we answer
+# it, and then speaks its follow-up with no turn_complete at all; 2.5 calls tools
+# mid-speech and may or may not say more afterwards. So a turn is never closed
+# while a tool call is unanswered, nor until TURN_TOOL_FOLLOWUP_MS after the last
+# tool response (time for the model to start its follow-up).
+TURN_TOOL_FOLLOWUP_MS  = 3000
+# After a barge-in, the old turn's trailing audio is suppressed until its
+# `interrupted` / turn_complete arrives; give up waiting after this long.
+BARGE_IN_SUPPRESS_MAX_MS = 3000
 
 # ── Voice pipeline: mic → energy VAD → ElevenLabs STT → text injection ────────
 #
@@ -84,13 +125,43 @@ VAD_BARGE_IN_MIN_SPEECH_MS = 400       # sustained loud speech needed to confirm
 # right after a rejected candidate.
 VAD_BARGE_IN_COOLDOWN_MS = 1200
 
-# ElevenLabs Scribe STT (see agent/elevenlabs_stt.py). Language auto-detected.
+# ElevenLabs Scribe STT (see agent/elevenlabs_stt.py). Language is auto-detected
+# but hinted with the language last spoken in the conversation (by either side),
+# which mostly matters for short barge-in snippets.
 STT_MODEL_ID = "scribe_v2"
 STT_TIMEOUT_MS = 20000
 
-# When True, client camera frames ARE forwarded to the Gemini Live model so it
-# can see (vision macro). Audio is never sent; only frames + injected text.
-SEND_FRAMES_TO_GEMINI = False
+# Unicode script (prefix of each letter's unicodedata name) → ISO-639-3 hint.
+# Malayalam, Tamil, Hindi and English each use a distinct script, so counting
+# letters per script identifies the language of a transcript. Transcripts with
+# no letters in these scripts (e.g. '我就是', 'أقول') are treated as noise.
+STT_SCRIPT_LANGS = {
+    "MALAYALAM": "mal",
+    "LATIN": "eng",
+    "TAMIL": "tam",
+    "DEVANAGARI": "hin",
+}
+
+# Barge-in echo filter: if at least this fraction of the words in a barge-in
+# snippet appear in what the AI is currently saying, the mic most likely picked
+# up the AI's own voice from the speaker, so the interrupt is rejected.
+BARGE_IN_ECHO_OVERLAP = 0.6
+
+# Sent to the model in place of a transcript that is mostly in scripts the
+# patient doesn't speak, so it asks them to repeat rather than staying silent.
+UNCLEAR_AUDIO_NOTICE = (
+    "[UNCLEAR_AUDIO] The patient said something, but the speech could not be "
+    "recognised. Briefly and kindly ask them to repeat it."
+)
+
+# Camera → Gemini. The app's camera button turns the live feed on/off: while on,
+# the app sends JPEG frames at LIVE_GEMINI_FRAME_FPS and they are forwarded to
+# Gemini as realtime video; while off, it sends none. Independently, the
+# 'view_camera' tool asks the app for one fresh snapshot (works with the feed
+# off) and waits up to CAMERA_SNAPSHOT_TIMEOUT_S for it.
+CAMERA_SNAPSHOT_TIMEOUT_S = 5.0
+# A frame younger than this counts as "current" for the adjust_camera orchestrator.
+CAMERA_FRAME_FRESH_S = 2.0
 
 # ── Edge-tracking (on-device detection) ───────────────────────────────────────
 # When True, the native app runs on-device detection and streams normalized
@@ -103,7 +174,7 @@ ENABLE_EDGE_TRACKING = True
 # initialize the client's two independent capture rates. "for now" they are
 # module constants; move to Django settings / per-user config later.
 LIVE_DETECTION_FPS   = 6     # on-device detection + offset send rate (Hz)
-LIVE_GEMINI_FRAME_FPS = 0    # JPEG frames sent to Gemini for vision (0 = off)
+LIVE_GEMINI_FRAME_FPS = 1    # JPEG frame rate while the app's camera feed is on
 
 # Proportional tracking params (backend-owned; adjustable live via _push_config).
 # offset is the target's horizontal displacement from frame centre, normalized
@@ -130,7 +201,19 @@ TRACK_COAST_TIMEOUT_MS  = 1500   # also give up if the subject stays lost this l
 
 class GeminiLiveConsumer(AsyncWebsocketConsumer):
     async def connect(self):
+        # No valid login (e.g. expired token): refuse instead of running an
+        # anonymous session with no patient context and no camera. The app
+        # refreshes its token and reconnects on close code 4001.
+        user = self.scope.get('user')
+        if not user or not user.is_authenticated:
+            logger.warning("Live AI connection without a valid login; closing (4001).")
+            await self.accept()
+            await self.close(code=4001)
+            return
         await self.accept()
+        # Start of this live session; the personal-notes update after it reads
+        # the conversation from here on.
+        self._connected_at = timezone.now()
         self.input_queue = asyncio.Queue()
         self.stop_event = asyncio.Event()
         self.session = None
@@ -161,12 +244,22 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         # True while a barge-in verification transcription is in flight, so the
         # ticker/receiver don't spawn a second one for the same noise burst.
         self._barge_in_checking = False
+        # Mic frames from the moment a barge-in candidate fires (seeded with the
+        # pre-roll) until STT verification decides. Verification takes 1–3s, far
+        # longer than the 1s pre-roll, so without this the first words of an
+        # interruption ("stop, …") were lost. None = no candidate pending.
+        self._barge_capture = None
         # monotonic() timestamp before which no new barge-in verification fires
         # (set after a rejected candidate to avoid hammering STT on motor noise).
         self._barge_in_cooldown_until = 0.0
         # After a barge-in we discard the interrupted turn's trailing audio until
-        # the next turn_complete / new injected turn takes over.
+        # that turn's `interrupted` / turn_complete arrives (or it ends naturally).
         self._suppress_ai_audio = False
+        # Set when a message is sent while the interrupted turn is still alive:
+        # its `interrupted` / turn_complete is then expected and must not be
+        # mistaken for the new turn's. Cleared on arrival or after a deadline.
+        self._expect_stale_close = False
+        self._expect_stale_close_until = 0.0
         # Empty-turn recovery: native-audio models occasionally close a turn
         # without emitting any audio/text/tool call (e.g. after a disfluent input
         # the model "thinks" and says nothing). _turn_saw_output flips True on any
@@ -175,6 +268,35 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         self._turn_saw_output = False
         self._last_injected_text = ""
         self._empty_turn_retried = False
+        # Turn tracking (see TURN_* constants). _turn_activity: any model signal
+        # (thought, audio, text, tool call, generation_complete) since our send.
+        self._turn_open = False
+        self._turn_activity = False
+        self._turn_gen_done = False
+        self._turn_sent_at = 0.0
+        self._last_server_msg_at = 0.0
+        # Audio actually forwarded to the client this turn, to estimate when the
+        # client finishes playing it.
+        self._turn_audio_started_at = None
+        self._turn_audio_bytes = 0
+        # Tool calls dispatched but not yet answered, and when the last answer
+        # was sent (see TURN_TOOL_FOLLOWUP_MS).
+        self._tools_outstanding = 0
+        self._last_tool_response_at = 0.0
+        # ISO-639-3 hint for STT: the language last spoken by either side.
+        self._lang_hint = None
+        # Gemini Live session resumption handle (valid ~2h after a disconnect).
+        self._resume_handle = None
+        # Set by a go_away-triggered planned reconnect (skips the backoff sleep).
+        self._planned_reconnect = False
+        self._go_away_task = None
+        # Camera: is the app's live feed on (camera button)? Latest frame received
+        # (for the adjust_camera orchestrator), and futures waiting for the next
+        # frame after a snapshot request.
+        self._camera_feed_on = False
+        self.latest_frame_b64 = None
+        self._latest_frame_at = 0.0
+        self._frame_waiters = []
         # ElevenLabs API key (resolved once; utterances skip STT if absent).
         self._elevenlabs_key = (
             os.environ.get("ELEVENLABS_API_KEY")
@@ -252,25 +374,48 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                     "medications": "None"
                 }
 
-            # 1. Recent Vitals (Last 7 Days)
+            # 1. Recent Vitals (Last 7 Days). Timestamps are stored as absolute
+            # instants (UTC); localtime() renders them in settings.TIME_ZONE (IST)
+            # regardless of the host/container clock.
             seven_days_ago = timezone.now() - timedelta(days=7)
-            recent_readings = VitalReading.objects.filter(
-                patient=patient,
+            readings = VitalReading.objects.filter(
+                patient=patient, is_deleted=False
+            ).select_related('vital_type')
+            recent_readings = readings.filter(
                 measured_at__gte=seven_days_ago
-            ).select_related('vital_type').order_by('-measured_at')[:10]
-            
+            ).order_by('-measured_at')[:10]
+
             vitals_summary = []
             for r in recent_readings:
-                vitals_summary.append(f"- {r.vital_type.name}: {r.get_display_value()} ({r.measured_at.strftime('%Y-%m-%d %H:%M')})")
-            
-            vitals_str = "\n".join(vitals_summary) if vitals_summary else "No recent readings"
+                vitals_summary.append(f"- {r.vital_type.name}: {r.get_display_value()} ({self._fmt_local(r.measured_at)})")
+
+            # For vital types with nothing in the last 7 days, include the latest
+            # older reading so the AI still knows the last known value.
+            recent_type_ids = set(
+                readings.filter(measured_at__gte=seven_days_ago)
+                .values_list('vital_type_id', flat=True)
+            )
+            older_summary = []
+            seen_types = set()
+            for r in readings.filter(measured_at__lt=seven_days_ago).order_by('-measured_at'):
+                if r.vital_type_id in recent_type_ids or r.vital_type_id in seen_types:
+                    continue
+                seen_types.add(r.vital_type_id)
+                older_summary.append(
+                    f"- {r.vital_type.name}: {r.get_display_value()} "
+                    f"({self._fmt_local(r.measured_at)} — older than 7 days, last known value)"
+                )
+
+            vitals_str = "\n".join(vitals_summary) if vitals_summary else "No readings in the last 7 days"
+            if older_summary:
+                vitals_str += "\n" + "\n".join(older_summary)
 
             # 2. Active Medications + today's adherence state (dynamic schedule)
-            from datetime import date
             from medications.models import MedicationAdherence
             from medications.schedule_utils import get_schedule_for_date, get_times_for_frequency
 
-            today = date.today()
+            # The patient's local date (IST), not the container's UTC date.
+            today = timezone.localdate()
 
             # Ensure adherence rows exist for today, then build a lookup
             # keyed by (medication_id, scheduled_time)
@@ -304,7 +449,7 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                     statuses = []
                     for rec in sorted(records, key=lambda r: r.scheduled_time):
                         taken_time = (
-                            f" — {rec.actual_datetime.strftime('%H:%M')}"
+                            f" — {timezone.localtime(rec.actual_datetime).strftime('%H:%M')}"
                             if rec.actual_datetime else ""
                         )
                         statuses.append(f"{rec.status}{taken_time}")
@@ -318,8 +463,13 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
 
             meds_str = "\n".join(meds_summary) if meds_summary else "No active medications"
 
+            location = ", ".join(
+                part for part in (patient.city, patient.state, patient.country) if part
+            )
             return {
                 "name": patient.user.get_full_name(),
+                "location": location if patient.city else "",
+                "personal_notes": patient.personal_notes.strip(),
                 "age": str(patient.age) if hasattr(patient, 'age') else "Unknown",
                 "gender": patient.gender if hasattr(patient, 'gender') else "Unknown",
                 "vitals": vitals_str,
@@ -419,6 +569,8 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
 
 
     async def disconnect(self, close_code):
+        if not hasattr(self, 'stop_event'):
+            return  # rejected in connect() before any setup
         self.stop_event.set()
         if getattr(self, '_vad_ticker_task', None):
             self._vad_ticker_task.cancel()
@@ -432,6 +584,23 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                 await self.task
             except asyncio.CancelledError:
                 pass
+        # Persist the turn that was in flight (its turn never closed).
+        user_t = (getattr(self, 'current_user_text', '') or '').strip()
+        ai_t = (getattr(self, 'current_ai_text', '') or '').strip()
+        if user_t or ai_t:
+            await self.save_turn_messages(user_t, ai_t)
+        # Fold this session into the patient's personal notes (Celery; the delay
+        # lets any in-flight message saves land first).
+        if getattr(self, 'patient', None) and getattr(self, '_connected_at', None):
+            try:
+                from .tasks import update_personal_notes
+                await asyncio.to_thread(
+                    update_personal_notes.apply_async,
+                    args=[self.patient.id, self._connected_at.isoformat()],
+                    countdown=10,
+                )
+            except Exception as e:
+                logger.error(f"Could not queue personal notes update: {e}")
         logger.info("Gemini Live WebSocket disconnected")
 
     # ── Voice pipeline: listening window, VAD ticker, transcribe + inject ─────
@@ -444,13 +613,14 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
             old = self._preroll.popleft()
             self._preroll_samples -= old.size
 
-    def _begin_window(self, seed_preroll=False):
+    def _begin_window(self, seed_frames=None):
         """
         Open a fresh listening window and start a new energy-VAD detector.
 
-        When `seed_preroll` is True (barge-in), the current pre-roll is prepended
-        to the utterance buffer and fed to the detector so the onset of speech
-        that occurred before the trigger is not lost.
+        `seed_frames` (barge-in) are mic frames already captured for this
+        utterance — the pre-roll plus everything since the interrupt candidate
+        fired — prepended to the buffer and fed to the detector so the start of
+        the interrupting speech is not lost.
         """
         self._eos = EnergyEosDetector(
             rate=INPUT_RATE,
@@ -458,8 +628,8 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
             min_speech_ms=VAD_MIN_SPEECH_MS,
             silence_ms=VAD_SILENCE_MS,
         )
-        if seed_preroll and self._preroll:
-            self._mic_buf = list(self._preroll)
+        if seed_frames:
+            self._mic_buf = list(seed_frames)
             for f in self._mic_buf:
                 self._eos.push_audio(f)
         else:
@@ -498,9 +668,183 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
             await self.send(bytes_data=bytes([0x03]))
         except Exception as e:
             logger.error(f"Barge-in: failed to send interrupt to client: {e}")
-        # Begin capturing the user's interrupting speech, seeded from the pre-roll
-        # so the onset (which happened before the trigger fired) is preserved.
-        self._begin_window(seed_preroll=True)
+        # Begin capturing the user's interrupting speech, seeded with everything
+        # captured since the candidate fired (incl. the pre-roll before it), so
+        # the whole utterance from its onset is transcribed.
+        seed = self._barge_capture if self._barge_capture else list(self._preroll)
+        self._barge_capture = None
+        self._begin_window(seed_frames=seed)
+
+    # ── Local time ───────────────────────────────────────────────────────────
+    # Datetimes are absolute instants; Django converts them to settings.TIME_ZONE
+    # (Asia/Kolkata), so the result does not depend on the host/container clock.
+
+    @staticmethod
+    def _fmt_local(dt) -> str:
+        return timezone.localtime(dt).strftime('%Y-%m-%d %H:%M')
+
+    @staticmethod
+    def _now_str() -> str:
+        return timezone.localtime().strftime('%A %d %B %Y, %I:%M %p IST')
+
+    # ── Language hint + barge-in plausibility ────────────────────────────────
+
+    @staticmethod
+    def _script_lang(text: str):
+        """
+        Language of `text` from the script its letters are written in: the
+        majority script among STT_SCRIPT_LANGS. Returns None when most letters
+        are in other scripts (e.g. '我就是', 'أقول'), i.e. the transcript is not
+        in a language the patient speaks; a few stray foreign characters do not
+        count against an otherwise valid transcript. Code-switched Malayalam
+        keeps English loanwords in Latin script, so the Malayalam majority wins.
+        """
+        counts = {}
+        foreign = 0
+        for ch in text:
+            if ch.isalpha():
+                script = unicodedata.name(ch, "").split(" ", 1)[0]
+                if script in STT_SCRIPT_LANGS:
+                    counts[script] = counts.get(script, 0) + 1
+                else:
+                    foreign += 1
+        if not counts or foreign > sum(counts.values()):
+            return None
+        return STT_SCRIPT_LANGS[max(counts, key=counts.get)]
+
+    def _update_lang_hint(self, text: str):
+        lang = self._script_lang(text)
+        if lang and lang != self._lang_hint:
+            logger.info(f"STT language hint → {lang}")
+            self._lang_hint = lang
+
+    def _is_echo_of_ai(self, text: str) -> bool:
+        """True if most words of `text` occur in what the AI is saying this turn."""
+        words = re.findall(r"\w+", text.lower())
+        if not words:
+            return False
+        ai_words = set(re.findall(r"\w+", self.current_ai_text.lower()))
+        overlap = sum(1 for w in words if w in ai_words) / len(words)
+        return overlap >= BARGE_IN_ECHO_OVERLAP
+
+    # ── Turn tracking ────────────────────────────────────────────────────────
+
+    def _mark_turn_sent(self):
+        """A message is being sent to Gemini: open a new turn."""
+        now = time.monotonic()
+        # If the interrupted turn is still alive, its interrupted/turn_complete
+        # is still to come and must not close this new turn.
+        if self._suppress_ai_audio:
+            self._expect_stale_close = True
+            self._expect_stale_close_until = now + BARGE_IN_SUPPRESS_MAX_MS / 1000.0
+        self._turn_open = True
+        self._turn_activity = False
+        self._turn_gen_done = False
+        self._turn_sent_at = now
+        self._last_server_msg_at = now
+        self._turn_audio_started_at = None
+        self._turn_audio_bytes = 0
+
+    def _open_implicit_turn(self):
+        """Model output arrived with no turn open (e.g. 3.x speaks after a tool
+        call whose turn already closed): track it as a turn of its own."""
+        self._mark_turn_sent()
+        self._turn_activity = True
+
+    def _end_stale_close(self):
+        """The interrupted turn has closed: stop suppressing its audio."""
+        self._expect_stale_close = False
+        self._suppress_ai_audio = False
+
+    async def _finish_turn(self, reason: str):
+        """
+        Close the current turn: re-prompt once if the model said nothing,
+        otherwise persist the exchange and open a listening window.
+        """
+        self._turn_open = False
+        self.ai_is_speaking = False
+        self._barge_in = None
+        # Any barge-in suppression is stale once a turn ends; let subsequent
+        # audio play.
+        self._suppress_ai_audio = False
+        if reason != "turn_complete":
+            logger.info(f"Closing turn without turn_complete ({reason}).")
+
+        if self.current_ai_text.strip():
+            self._update_lang_hint(self.current_ai_text)
+
+        # Empty-turn recovery: if the model closed the turn without any
+        # audio/text/tool call, it silently ignored the user. Re-send the last
+        # user text ONCE to elicit a real response.
+        if (
+            not self._turn_saw_output
+            and self._last_injected_text
+            and not self._empty_turn_retried
+        ):
+            self._empty_turn_retried = True
+            logger.info(
+                "Model returned an empty turn (no audio/text/tool call); "
+                "re-prompting the last user message once."
+            )
+            # Don't save yet (no AI reply) and don't open a listening window —
+            # re-drive the same turn. current_user_text is kept so it saves
+            # after the retry completes.
+            await self.input_queue.put({"text": self._last_injected_text})
+            return
+
+        if not self._turn_saw_output and self._empty_turn_retried:
+            logger.info("Model returned an empty turn again after retry; giving up.")
+        user_t = self.current_user_text.strip()
+        ai_t = self.current_ai_text.strip()
+        if user_t or ai_t:
+            asyncio.create_task(self.save_turn_messages(user_t, ai_t))
+
+        self.current_user_text = ""
+        self.current_ai_text = ""
+        self._last_injected_text = ""
+        self._empty_turn_retried = False
+        self._turn_saw_output = False
+
+        # Model finished speaking → open a listening window, unless a barge-in
+        # already opened one that is still capturing the user's speech. If an
+        # interrupt candidate is still being verified, the user started talking
+        # before the AI finished: keep that audio as the start of the utterance.
+        if not self._window_active:
+            seed = self._barge_capture
+            self._barge_capture = None
+            self._begin_window(seed_frames=seed)
+
+    async def _turn_watchdog(self):
+        """
+        Polled by the VAD ticker. Guarantees an open turn always closes (so a
+        listening window always reopens) even when Gemini never sends
+        turn_complete for it.
+        """
+        now = time.monotonic()
+        if self._expect_stale_close and now >= self._expect_stale_close_until:
+            logger.info("Interrupted turn never closed; ending audio suppression.")
+            self._end_stale_close()
+        if not self._turn_open:
+            return
+        quiet = now - self._last_server_msg_at
+        tools_settled = (
+            self._tools_outstanding == 0
+            and now - self._last_tool_response_at >= TURN_TOOL_FOLLOWUP_MS / 1000.0
+        )
+        if self._turn_gen_done and tools_settled:
+            playback_end = 0.0
+            if self._turn_audio_started_at is not None:
+                playback_end = (
+                    self._turn_audio_started_at
+                    + self._turn_audio_bytes / (OUTPUT_RATE * 2)
+                    + TURN_PLAYBACK_MARGIN_MS / 1000.0
+                )
+            if quiet >= TURN_GEN_DONE_GRACE_MS / 1000.0 and now >= playback_end:
+                await self._finish_turn("generation complete")
+        elif not self._turn_activity and now - self._turn_sent_at >= TURN_NO_RESPONSE_MS / 1000.0:
+            await self._finish_turn("no response from model")
+        elif quiet >= TURN_STALL_MS / 1000.0:
+            await self._finish_turn("model went quiet mid-turn")
 
     @staticmethod
     def _is_transient_disconnect(exc: BaseException) -> bool:
@@ -555,6 +899,7 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                     STT_TIMEOUT_MS / 1000.0,
                     self._elevenlabs_key,
                     False,  # tag_audio_events — suppress non-speech tags
+                    self._lang_hint,
                 )
             except Exception as e:
                 logger.error(f"Barge-in verification STT failed: {e}")
@@ -566,19 +911,31 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
 
             # Strip any stray brackets/parens defensively; keep only real words.
             lexical = re.sub(r"\[[^\]]*\]|\([^\)]*\)", "", text or "").strip()
-            if lexical and self.ai_is_speaking:
+            reject = None
+            if lexical:
+                if self._script_lang(lexical) is None:
+                    reject = "not in an expected language"
+                elif self._is_echo_of_ai(lexical):
+                    reject = "echo of the AI's own voice"
+            if lexical and not reject and self.ai_is_speaking:
                 logger.info(f"Barge-in verified by STT: {lexical[:60]!r}")
                 await self._handle_barge_in()
             else:
-                logger.debug(
-                    "Barge-in candidate rejected (no real speech in snapshot)."
-                )
+                if reject:
+                    logger.info(f"Barge-in rejected ({reject}): {lexical[:60]!r}")
+                else:
+                    logger.debug(
+                        "Barge-in candidate rejected (no real speech in snapshot)."
+                    )
                 self._barge_in_cooldown_until = time.monotonic() + (
                     VAD_BARGE_IN_COOLDOWN_MS / 1000.0
                 )
                 self._rearm_barge_in()
         finally:
             self._barge_in_checking = False
+            # Consumed by _handle_barge_in / _finish_turn if it was speech;
+            # otherwise it was noise (or the AI stopped) — drop it.
+            self._barge_capture = None
 
     async def _vad_ticker(self):
         """
@@ -591,6 +948,10 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                 await asyncio.sleep(VAD_TICK_MS / 1000.0)
                 if self.stop_event.is_set():
                     break
+                try:
+                    await self._turn_watchdog()
+                except Exception as e:
+                    logger.error(f"Turn watchdog error: {e}", exc_info=True)
                 if not self._window_active or self._eos is None:
                     continue
                 if self.ai_is_speaking:
@@ -637,6 +998,7 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                     STT_MODEL_ID,
                     STT_TIMEOUT_MS / 1000.0,
                     self._elevenlabs_key,
+                    language_code=self._lang_hint,
                 )
             except Exception as e:
                 logger.error(f"ElevenLabs STT failed: {e}")
@@ -658,18 +1020,36 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                 logger.info(f"Transcript is non-speech only ({text!r}); skipping injection.")
                 self._begin_window()
                 return
-
-            logger.info(f"🗣️ Transcript injected: {text!r}")
-            self.current_user_text = text
-            # This new turn supersedes any interrupted AI turn: allow audio again.
-            self._suppress_ai_audio = False
+            # Mostly in scripts the patient doesn't speak (e.g. '我就是', 'أقول'):
+            # the patient said something STT could not recognise. Don't pass the
+            # garbage on, but tell the model so it asks them to repeat instead of
+            # staying silent. Not saved as a patient message.
+            unclear = self._script_lang(lexical) is None
+            if unclear:
+                logger.info(f"Transcript not in an expected language ({text!r}); telling the model the audio was unclear.")
+                text = UNCLEAR_AUDIO_NOTICE
+            else:
+                logger.info(f"🗣️ Transcript injected: {text!r}")
+                self._update_lang_hint(lexical)
+            # A barge-in left the interrupted turn open: persist what was said in
+            # it before this new turn takes over.
+            barge = self._suppress_ai_audio
+            if barge and self._turn_open:
+                old_user = self.current_user_text.strip()
+                old_ai = self.current_ai_text.strip()
+                if old_user or old_ai:
+                    asyncio.create_task(self.save_turn_messages(old_user, old_ai))
+                self.current_ai_text = ""
+            self.current_user_text = "" if unclear else text
             # Track this as the prompt to re-send if the model returns an empty
             # turn, and reset the per-turn output/ retry guards for the new turn.
             self._last_injected_text = text
             self._empty_turn_retried = False
             self._turn_saw_output = False
-            # Inject as a completed user turn. The window reopens on turn_complete.
-            await self.input_queue.put({"text": text})
+            # Inject as a completed user turn. The window reopens when the turn
+            # closes. Audio stays suppressed until the interrupted turn closes
+            # (see _mark_turn_sent / _end_stale_close).
+            await self.input_queue.put({"text": text, "barge": barge})
         finally:
             self._transcribing = False
 
@@ -705,6 +1085,8 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                     # pre-roll and hand it to STT verification, which decides
                     # whether real speech is present before actually interrupting.
                     if self.ai_is_speaking:
+                        if self._barge_capture is not None:
+                            self._barge_capture.append(frame)
                         if (
                             self._barge_in is not None
                             and not self._barge_in_checking
@@ -713,9 +1095,10 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                             self._barge_in.push_audio(frame)
                             if self._barge_in.saw_speech:
                                 self._barge_in_checking = True
+                                self._barge_capture = list(self._preroll)
                                 snapshot = (
-                                    np.concatenate(list(self._preroll))
-                                    if self._preroll
+                                    np.concatenate(self._barge_capture)
+                                    if self._barge_capture
                                     else np.array([], dtype=np.int16)
                                 )
                                 # Disarm the energy detector while STT runs; it is
@@ -735,14 +1118,19 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                     return
 
                 elif msg_type_byte == 0x01:
-                    b64_image = base64.b64encode(payload_data).decode('utf-8')
-                    # Store latest frame for manual-override inference
-                    self.latest_frame_b64 = b64_image
-                    if SEND_FRAMES_TO_GEMINI:
-                        await self.input_queue.put({
-                            "mime_type": "image/jpeg",
-                            "data": b64_image
-                        })
+                    jpeg = bytes(payload_data)
+                    # Latest frame, for the adjust_camera orchestrator.
+                    self.latest_frame_b64 = base64.b64encode(jpeg).decode('utf-8')
+                    self._latest_frame_at = time.monotonic()
+                    # Fulfil pending snapshot requests (view_camera).
+                    waiters, self._frame_waiters = self._frame_waiters, []
+                    for fut in waiters:
+                        if not fut.done():
+                            fut.set_result(jpeg)
+                    # Live feed: forward to Gemini only while the app's camera
+                    # button is on.
+                    if self._camera_feed_on:
+                        await self.input_queue.put({"image": jpeg})
                 
                 elif msg_type_byte == 0x02:
                     data = json.loads(payload_data.decode('utf-8'))
@@ -750,6 +1138,9 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                         await self.input_queue.put({"text": data.get("content") or data.get("data")})
                     elif data.get("type") == "track_offset":
                         await self._handle_track_offset(data)
+                    elif data.get("type") == "camera_feed":
+                        self._camera_feed_on = bool(data.get("enabled"))
+                        logger.info(f"Camera feed to Gemini {'ON' if self._camera_feed_on else 'OFF'} (app camera button).")
                 
                 return
 
@@ -765,11 +1156,8 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
                     # configuration". Audio must go through the 0x00 binary path.
                     logger.debug("Ignoring legacy JSON 'audio' frame (audio is never sent to Gemini).")
                 elif msg_type == "image":
-                    if SEND_FRAMES_TO_GEMINI:
-                        await self.input_queue.put({
-                            "mime_type": data.get("mime_type"),
-                            "data": data.get("data"),
-                        })
+                    if self._camera_feed_on and data.get("data"):
+                        await self.input_queue.put({"image": base64.b64decode(data["data"])})
                 elif msg_type == "text":
                     await self.input_queue.put({"text": data.get("data")})
 
@@ -843,8 +1231,13 @@ Context:
 - Patient Name: {context['name']}
 - Age: {context['age']}
 - Gender: {context['gender']}
+- Current date and time (session start): {self._now_str()}
+- Location: {context.get('location') or "Unknown (ask the patient which town they are in if you need it, e.g. for weather)"}
 
-Recent Vitals (Last 7 Days):
+Personal notes about the patient (kept from past conversations; use them naturally to make the conversation personal, never recite them or mention that you keep notes):
+{context.get('personal_notes') or "None yet."}
+
+Recent Vitals (Last 7 Days, plus the last known value of any vital not measured in that period):
 {context['vitals']}
 
 Active Medications:
@@ -869,6 +1262,10 @@ Your Capabilities:
 
 3. You can record vital signs if the patient shows you a device or tells you a reading. Pan to get a better view of the device if needed.
 
+4. Seeing: you only see the patient when they turn on the camera feed with the camera button in the app (you then receive about one camera image per second). Whenever you need to see something — a device reading, a medicine, a wound, whether the patient is okay — and you have no current image, call 'view_camera' to take a single snapshot; it works even when the feed is off. Tell the patient briefly that you are taking a look. Never describe or guess what you cannot currently see.
+
+5. You can search the internet (Google Search) for current information: weather, news, sports scores, festival dates, opening hours, prices, or any general question. Search whenever the answer depends on today's information or on facts you are not sure of — never guess. For weather, use the patient's location; if it is unknown, ask which town they are in. Summarise results in one or two short sentences in the patient's language. Do not volunteer distressing news unless asked, and do not use search results to diagnose or change medical treatment.
+
 Rules:
 - Speak clearly and warmly.
 - The camera tracks the patient automatically. Only call 'adjust_camera' when the automated tracking is not keeping up, or when you specifically want to look somewhere.
@@ -876,7 +1273,9 @@ Rules:
 - If you see a medical device, ask if you should record the reading.
 - If the patient seems distressed, offer to call for help (simulated).
 - Use the 'record_vital_reading' tool to save health data.
-- Considering that the user is in GMT +5:30, check if there are any medications to be taken and whether the last dose was taken when you have a free moment in the conversation.
+- Time: the patient is in India (IST). Every message you receive starts with a "[Time now: ...]" tag added by the system with the current IST time; always use the latest tag for anything time-related (greetings, "what time is it", medication timing). Never read the tag aloud or mention it.
+- When you have a free moment in the conversation, check if there are any medications to be taken and whether the last dose was taken.
+- A message starting with [UNCLEAR_AUDIO] means the patient spoke but the speech could not be recognised. Do not guess what they said; briefly and kindly ask them to repeat it.
 
 Activity Logging (IMPORTANT):
 - CRITICAL — DO NOT RE-LOG HISTORY: The "Recent conversation history" section below is
@@ -1026,9 +1425,37 @@ Meal Logging:
                             required=["activity_type", "description"]
                         )
                     ),
+                    types.FunctionDeclaration(
+                        name="view_camera",
+                        description=(
+                            "Take one fresh snapshot from the patient's camera so you can see something: "
+                            "a device reading, a medicine strip or label, a wound or rash, the patient, the room. "
+                            "Works even when the live camera feed is off. The image arrives in the next message — "
+                            "do not describe or guess anything about it until you receive it."
+                        ),
+                        parameters=types.Schema(
+                            type="OBJECT",
+                            properties={
+                                "reason": types.Schema(
+                                    type="STRING",
+                                    description="What you want to look at, e.g. 'read the BP monitor'."
+                                )
+                            }
+                        )
+                    ),
                 ]
             )
         ]
+        # 3.x Live models run tools NON_BLOCKING by default (the model keeps going
+        # without waiting); the handlers here assume it waits for each response.
+        for tool in tools:
+            for fd in tool.function_declarations:
+                fd.behavior = types.Behavior.BLOCKING
+        # Built-in Google Search grounding (weather, news, anything current). It
+        # runs server-side: no tool_call reaches us, the model just speaks the
+        # answer. Billed per search query (Gemini 3: 5,000/month free, then
+        # $14 per 1,000).
+        tools.append(types.Tool(google_search=types.GoogleSearch()))
 
         client = genai.Client(
             http_options={"api_version": "v1beta"},
@@ -1044,20 +1471,27 @@ Meal Logging:
 
         # Greet only once per connection lifetime (not on every silent reconnect).
         greeted = False
+        # System instruction of the current Gemini session; reused verbatim when
+        # resuming it (the server restores the conversation itself).
+        session_instruction = None
 
         while not self.stop_event.is_set():
+            resuming = self._resume_handle is not None
+            got_message = False
             try:
-                # Re-seed the fresh session with the latest conversation history
-                # from the DB so context carries across reconnects. (Also (re)binds
-                # self.db_session.) On the first connect this is the pre-session
-                # history; on a reconnect it includes everything said this session.
-                recent_messages_str = await self.get_recent_messages_context()
-                session_instruction = (
-                    system_instruction
-                    + "\n\nRecent conversation history (READ-ONLY context, already "
-                    + "logged — do NOT call log_patient_activity for anything here):\n"
-                    + recent_messages_str
-                )
+                if not resuming or session_instruction is None:
+                    # Fresh session: seed it with the latest conversation history
+                    # from the DB so context carries across reconnects. (Also
+                    # (re)binds self.db_session.) On the first connect this is the
+                    # pre-session history; on a non-resumable reconnect it includes
+                    # everything said this session.
+                    recent_messages_str = await self.get_recent_messages_context()
+                    session_instruction = (
+                        system_instruction
+                        + "\n\nRecent conversation history (READ-ONLY context, already "
+                        + "logged — do NOT call log_patient_activity for anything here):\n"
+                        + recent_messages_str
+                    )
                 config = types.LiveConnectConfig(
                     response_modalities=["AUDIO"],
                     media_resolution="MEDIA_RESOLUTION_MEDIUM",
@@ -1067,30 +1501,50 @@ Meal Logging:
                     tools=tools,  # Pass tool definitions
                     speech_config=types.SpeechConfig(
                         voice_config=types.VoiceConfig(
-                            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Zephyr")
+                            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Sulafat")
                         )
                     ),
                     realtime_input_config=realtime_input_config,
+                    # Text of what the AI says: saved as the AGENT message, used for
+                    # the STT language hint and the barge-in echo filter.
+                    output_audio_transcription=types.AudioTranscriptionConfig(),
+                    # Resumable sessions survive connection resets (Gemini closes
+                    # every connection after ~10 min, announced by go_away).
+                    session_resumption=types.SessionResumptionConfig(
+                        handle=self._resume_handle
+                    ),
+                    # Without compression, audio sessions end after ~15 minutes.
+                    context_window_compression=types.ContextWindowCompressionConfig(
+                        sliding_window=types.SlidingWindow()
+                    ),
                 )
                 async with client.aio.live.connect(model=MODEL, config=config) as session:
                     self.session = session
+                    self._planned_reconnect = False
                     self.current_user_text = ""
                     self.current_ai_text = ""
-                    # Fresh connection: open a listening window immediately so the
-                    # user can speak first (no audio is ever sent to the model, so
-                    # it will not greet unprompted). The window is recreated on
-                    # every turn_complete thereafter.
+                    # New connection: any turn in flight on the old one is gone.
+                    # Open a listening window so the user can speak (no audio is
+                    # ever sent to the model, so it will not speak unprompted) —
+                    # unless one is already open and may be capturing speech.
                     self.ai_is_speaking = False
                     self._barge_in = None
                     self._barge_in_checking = False
                     self._barge_in_cooldown_until = 0.0
                     self._suppress_ai_audio = False
+                    self._expect_stale_close = False
+                    self._turn_open = False
+                    self._tools_outstanding = 0
                     self._turn_saw_output = False
                     self._last_injected_text = ""
                     self._empty_turn_retried = False
-                    self._begin_window()
-                    logger.info("Connected to Gemini Live")
-                    
+                    if not self._window_active:
+                        self._begin_window()
+                    logger.info(
+                        "Connected to Gemini Live"
+                        + (" (resuming previous session)" if resuming else "")
+                    )
+
                     # Start the sender loop
                     sender_task = asyncio.create_task(self.sender_loop())
 
@@ -1115,136 +1569,25 @@ Meal Logging:
                     # Receiver loop
                     logger.info("Starting receiver loop")
                     try:
-                        while not self.stop_event.is_set():
+                        while not self.stop_event.is_set() and not self._planned_reconnect:
                             async for response in session.receive():
                                 if self.stop_event.is_set():
                                     break
-                                
-                                # 1. Handle actual media/text content first
-                                if response.data:
-                                    # After a barge-in, discard the interrupted
-                                    # turn's trailing audio instead of replaying it.
-                                    if not self._suppress_ai_audio:
-                                        if not self.ai_is_speaking:
-                                            # Transition into AI speech: arm a fresh
-                                            # barge-in detector for this turn.
-                                            self.ai_is_speaking = True
-                                            self._start_barge_in_detector()
-                                        self._turn_saw_output = True
-                                        payload = bytes([0x00]) + response.data
-                                        await self.send(bytes_data=payload)
+                                got_message = True
+                                self._last_server_msg_at = time.monotonic()
+                                await self._handle_server_message(response, session)
 
-                                if response.text:
-                                    logger.debug(f"[AI_SPEAKING={self.ai_is_speaking}] Received text: {response.text[:50]}...")
-                                    self._turn_saw_output = True
-                                    self.current_ai_text += response.text
-                                    payload = bytes([0x02]) + json.dumps({
-                                        "type": "text",
-                                        "content": response.text
-                                    }).encode('utf-8')
-                                    await self.send(bytes_data=payload)
-                                    
-                                # 2. Handle Server Signals (turn_complete MUST override audio chunks in the same payload)
-                                server_content = getattr(response, "server_content", None)
-                                if server_content:
-                                    if getattr(server_content, 'interrupted', False):
-                                        logger.info(f"[AI_SPEAKING={self.ai_is_speaking}] Gemini signaled interrupt. Sending 0x03 to frontend.")
-                                        await self.send(bytes_data=bytes([0x03]))
-                                        self.ai_is_speaking = False
-                                        self._barge_in = None
-
-                                    if getattr(server_content, 'turn_complete', False):
-                                        logger.debug(f"[AI_SPEAKING={self.ai_is_speaking}] Server content: turn_complete=True. Resetting flag.")
-                                        self.ai_is_speaking = False
-                                        self._barge_in = None
-                                        # Any barge-in suppression is stale once a
-                                        # turn ends; let subsequent audio play.
-                                        self._suppress_ai_audio = False
-
-                                        # Empty-turn recovery: if the model closed the
-                                        # turn without any audio/text/tool call, it
-                                        # silently ignored the user. Re-send the last
-                                        # user text ONCE to elicit a real response.
-                                        if (
-                                            not self._turn_saw_output
-                                            and self._last_injected_text
-                                            and not self._empty_turn_retried
-                                        ):
-                                            self._empty_turn_retried = True
-                                            self._turn_saw_output = False
-                                            logger.info(
-                                                "Model returned an empty turn (no "
-                                                "audio/text/tool call); re-prompting "
-                                                "the last user message once."
-                                            )
-                                            # Don't save yet (no AI reply) and don't
-                                            # open a listening window — re-drive the
-                                            # same turn. current_user_text is kept so
-                                            # it saves after the retry completes.
-                                            await self.input_queue.put(
-                                                {"text": self._last_injected_text}
-                                            )
-                                        else:
-                                            if not self._turn_saw_output:
-                                                logger.info(
-                                                    "Model returned an empty turn "
-                                                    "again after retry; giving up."
-                                                )
-                                            user_t = self.current_user_text.strip()
-                                            ai_t = self.current_ai_text.strip()
-                                            if user_t or ai_t:
-                                                asyncio.create_task(self.save_turn_messages(user_t, ai_t))
-
-                                            self.current_user_text = ""
-                                            self.current_ai_text = ""
-                                            self._last_injected_text = ""
-                                            self._empty_turn_retried = False
-                                            self._turn_saw_output = False
-
-                                            # Model finished speaking → open a listening
-                                            # window, unless a barge-in already opened one
-                                            # that is still capturing the user's speech.
-                                            if not self._window_active:
-                                                self._begin_window()
-                                        
-                                # 3. Handle Tool Calls directly on response OR inside model_turn
-                                function_calls = []
-                                tool_call = getattr(response, "tool_call", None)
-                                if tool_call and hasattr(tool_call, "function_calls"):
-                                    function_calls.extend(tool_call.function_calls)
-                                
-                                if server_content and getattr(server_content, 'model_turn', None):
-                                    mt = server_content.model_turn
-                                    if hasattr(mt, 'parts'):
-                                        for part in mt.parts:
-                                            if hasattr(part, 'function_call') and part.function_call:
-                                                function_calls.append(part.function_call)
-                                
-                                if function_calls:
-                                    # A tool call counts as real model output for
-                                    # empty-turn detection (the model acted).
-                                    self._turn_saw_output = True
-                                for fc in function_calls:
-                                    logger.info(f"Function call requested: {fc.name}")
-                                    fc_args = dict(fc.args) if hasattr(fc, "args") and fc.args else {}
-                                    fc_id = getattr(fc, 'id', None)
-                                    if fc.name == "adjust_camera":
-                                        command = fc_args.get("command", "")
-                                        asyncio.create_task(self.handle_adjust_camera(command, fc_id))
-                                    elif fc.name == "record_vital_reading":
-                                        asyncio.create_task(self.handle_record_vital(fc_args, fc_id))
-                                    elif fc.name == "log_patient_activity":
-                                        asyncio.create_task(self.handle_log_activity(fc_args, fc_id))
-                                            
                             logger.debug("Receiver loop finished (turn complete). Re-entering...")
                             if self.stop_event.is_set():
                                 break
-                            
+
                             # Small delay to prevent busy looping if connection is dead but not raising error
                             await asyncio.sleep(0.05)
 
                     except Exception as inner_e:
-                        if self._is_transient_disconnect(inner_e):
+                        if self._planned_reconnect:
+                            pass
+                        elif self._is_transient_disconnect(inner_e):
                             logger.warning(
                                 f"Gemini Live connection dropped ({inner_e}); "
                                 "reconnecting."
@@ -1260,10 +1603,19 @@ Meal Logging:
                         await sender_task
                     except asyncio.CancelledError:
                         pass
-                    
+                    if self._go_away_task and not self._go_away_task.done():
+                        self._go_away_task.cancel()
+                    self._go_away_task = None
+
                 if self.stop_event.is_set():
                     break
-                    
+                if resuming and not got_message:
+                    logger.warning("Session resumption failed; starting a fresh session.")
+                    self._resume_handle = None
+                if self._planned_reconnect:
+                    logger.info("Reconnecting to Gemini Live (planned, after go_away).")
+                    continue
+
                 logger.warning("Gemini session disconnected silently, reconnecting in 1s...")
                 await asyncio.sleep(1)
 
@@ -1273,7 +1625,10 @@ Meal Logging:
             except Exception as e:
                 if self.stop_event.is_set():
                     break
-                if self._is_transient_disconnect(e):
+                if resuming and not got_message:
+                    logger.warning(f"Session resumption failed ({e}); starting a fresh session.")
+                    self._resume_handle = None
+                elif self._is_transient_disconnect(e):
                     logger.warning(
                         f"Gemini Live connection dropped ({e}); reconnecting in 2s..."
                     )
@@ -1281,8 +1636,176 @@ Meal Logging:
                     logger.error(f"Gemini session error: {e}", exc_info=True)
                     logger.warning("Gemini session crashed, reconnecting in 2s...")
                 await asyncio.sleep(2)
-        
+
         logger.info("Exiting run_gemini_session")
+
+    async def _handle_server_message(self, response, session):
+        """Handle one message from Gemini Live (see the turn-tracking notes at the top)."""
+        server_content = getattr(response, "server_content", None)
+        # Audio sent while waiting for the interrupted turn to close belongs to
+        # that turn: it is dropped and says nothing about the new turn.
+        stale = self._expect_stale_close
+
+        # 1. Model output parts. Read parts directly (rather than response.data /
+        # response.text) so thought parts are recognized and the SDK does not warn
+        # about mixed part types.
+        function_calls = []
+        model_turn = server_content.model_turn if server_content else None
+        for part in (model_turn.parts or []) if model_turn else []:
+            if part.function_call:
+                function_calls.append(part.function_call)
+            elif part.inline_data and part.inline_data.data:
+                if self._suppress_ai_audio:
+                    # Interrupted turn's trailing audio: discard, don't replay it.
+                    # Before the user's new message is sent this still counts as
+                    # output of the interrupted turn (so it is never re-prompted).
+                    if not stale:
+                        self._turn_activity = True
+                        self._turn_saw_output = True
+                    continue
+                if not self._turn_open:
+                    self._open_implicit_turn()
+                self._turn_activity = True
+                self._turn_saw_output = True
+                self._turn_gen_done = False
+                if not self.ai_is_speaking:
+                    # Transition into AI speech: arm a fresh barge-in detector.
+                    self.ai_is_speaking = True
+                    self._start_barge_in_detector()
+                if self._turn_audio_started_at is None:
+                    self._turn_audio_started_at = time.monotonic()
+                self._turn_audio_bytes += len(part.inline_data.data)
+                await self.send(bytes_data=bytes([0x00]) + part.inline_data.data)
+            elif part.thought:
+                if not stale:
+                    self._turn_activity = True
+                    self._turn_gen_done = False
+            elif part.text:
+                logger.debug(f"[AI_SPEAKING={self.ai_is_speaking}] Received text: {part.text[:50]}...")
+                if not stale:
+                    self._turn_activity = True
+                    self._turn_saw_output = True
+                await self.send(bytes_data=bytes([0x02]) + json.dumps({
+                    "type": "text",
+                    "content": part.text
+                }).encode('utf-8'))
+
+        # Tool calls, delivered on response.tool_call or inside model_turn. Counted
+        # before the turn signals below, which may arrive in the same message.
+        tool_call = getattr(response, "tool_call", None)
+        if tool_call and tool_call.function_calls:
+            function_calls.extend(tool_call.function_calls)
+        if function_calls:
+            if not self._turn_open:
+                self._open_implicit_turn()
+            # A tool call counts as real model output for empty-turn detection.
+            self._turn_activity = True
+            self._turn_saw_output = True
+            self._tools_outstanding += len(function_calls)
+
+        # Google Search runs server-side; log its queries (each one is billed).
+        grounding = server_content.grounding_metadata if server_content else None
+        if grounding and grounding.web_search_queries:
+            logger.info(f"Web search: {grounding.web_search_queries}")
+
+        # What the AI actually said (skipping the part the user cut off).
+        if server_content and server_content.output_transcription:
+            spoken = server_content.output_transcription.text
+            if spoken and self._turn_open and not self._suppress_ai_audio:
+                self.current_ai_text += spoken
+
+        # 2. Server signals
+        if server_content:
+            if server_content.interrupted:
+                logger.info(f"[AI_SPEAKING={self.ai_is_speaking}] Gemini signaled interrupt. Sending 0x03 to frontend.")
+                await self.send(bytes_data=bytes([0x03]))
+                self.ai_is_speaking = False
+                self._barge_in = None
+                if self._expect_stale_close:
+                    self._end_stale_close()
+
+            if server_content.generation_complete and not stale:
+                self._turn_activity = True
+                self._turn_gen_done = True
+
+            if server_content.turn_complete:
+                if self._expect_stale_close:
+                    # Closes the interrupted turn, not the one just sent.
+                    self._end_stale_close()
+                elif not self._turn_open or not self._turn_activity:
+                    # Gemini withholds turn_complete after tool calls until the
+                    # next message; arriving before any new output, it belongs to
+                    # an earlier turn and must not end (or "empty") this one.
+                    logger.info("Ignoring stale turn_complete from an earlier turn.")
+                elif self._tools_outstanding > 0:
+                    # 3.x closes the turn as soon as it calls a tool, then speaks
+                    # its follow-up once answered; the watchdog closes the turn
+                    # after that follow-up (or after TURN_TOOL_FOLLOWUP_MS).
+                    logger.debug("turn_complete while a tool call is unanswered; waiting for the follow-up.")
+                else:
+                    await self._finish_turn("turn_complete")
+
+        # 3. Dispatch tool calls.
+        for fc in function_calls:
+            logger.info(f"Function call requested: {fc.name}")
+            fc_args = dict(fc.args) if hasattr(fc, "args") and fc.args else {}
+            fc_id = getattr(fc, 'id', None)
+            if fc.name == "adjust_camera":
+                command = fc_args.get("command", "")
+                asyncio.create_task(self._run_tool(self.handle_adjust_camera(command, fc_id)))
+            elif fc.name == "record_vital_reading":
+                asyncio.create_task(self._run_tool(self.handle_record_vital(fc_args, fc_id)))
+            elif fc.name == "log_patient_activity":
+                asyncio.create_task(self._run_tool(self.handle_log_activity(fc_args, fc_id)))
+            elif fc.name == "view_camera":
+                asyncio.create_task(self._run_tool(self.handle_view_camera(fc_args, fc_id)))
+            else:
+                logger.warning(f"Unknown function call: {fc.name}")
+                self._tools_outstanding = max(0, self._tools_outstanding - 1)
+
+        # 4. Session lifecycle
+        update = getattr(response, "session_resumption_update", None)
+        if update and update.resumable and update.new_handle:
+            self._resume_handle = update.new_handle
+
+        go_away = getattr(response, "go_away", None)
+        if go_away:
+            logger.info(
+                f"Gemini go_away: connection closes in {go_away.time_left}; "
+                "reconnecting at the next pause."
+            )
+            if self._go_away_task is None or self._go_away_task.done():
+                self._go_away_task = asyncio.create_task(self._reconnect_when_idle(session))
+
+    async def _run_tool(self, handler):
+        """Run a tool handler (which sends the tool response) and track it for
+        turn closing (see TURN_TOOL_FOLLOWUP_MS)."""
+        try:
+            await handler
+        finally:
+            self._tools_outstanding = max(0, self._tools_outstanding - 1)
+            self._last_tool_response_at = time.monotonic()
+
+    async def _reconnect_when_idle(self, session):
+        """
+        After go_away, wait until nothing is in flight (no open turn, AI silent,
+        no transcription running), then close the connection; the session loop
+        reconnects at once with the resumption handle. If Gemini closes first,
+        the normal reconnect path resumes the session the same way.
+        """
+        try:
+            while not self.stop_event.is_set():
+                if not (self._turn_open or self.ai_is_speaking or self._transcribing):
+                    break
+                await asyncio.sleep(0.1)
+            if self.stop_event.is_set() or self._resume_handle is None:
+                return
+            self._planned_reconnect = True
+            await session.close()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning(f"Planned reconnect: closing the old connection failed: {e}")
 
     @database_sync_to_async
     def _save_activity_log(self, params: dict) -> dict:
@@ -1404,19 +1927,36 @@ Meal Logging:
 
                 if "text" in item:
                     # Injected transcript (or client text) → drives the model's turn.
-                    logger.info(f"Sending text to Gemini: {item['text']}")
-                    await self.session.send(input=item["text"], end_of_turn=True)
-                else:
-                    # It's media (image) dict {"mime_type":..., "data":...}.
-                    # Guard: never forward audio — the Live API rejects it with
-                    # 1007 and closes the socket. Audio is handled locally only.
-                    mime = str(item.get("mime_type") or "")
-                    if mime.startswith("audio"):
-                        logger.debug(f"sender_loop dropped audio media ({mime}); audio is never sent to Gemini.")
-                        continue
-                    # Send dict with Base64 exactly as the SDK expects for LiveConnect!
-                    await self.session.send(input=item)
-                    
+                    interrupting = self._suppress_ai_audio
+                    self._mark_turn_sent()
+                    if (
+                        item.get("barge")
+                        and interrupting
+                        and INTERRUPT_WITH_ACTIVITY_SIGNALS
+                    ):
+                        # Stop the interrupted generation server-side; must be
+                        # immediately followed by the new text (see constant).
+                        await self.session.send_realtime_input(activity_start=types.ActivityStart())
+                        await self.session.send_realtime_input(activity_end=types.ActivityEnd())
+                    # The session (and its system prompt) can last hours across
+                    # resumptions, so every message carries the current IST time.
+                    text = f"[Time now: {self._now_str()}] {item['text']}"
+                    parts = [types.Part(text=text)]
+                    if item.get("image"):
+                        # Snapshot for view_camera: an image inside a client turn
+                        # is reliably seen (one sent with a tool response is not).
+                        parts.append(types.Part.from_bytes(data=item["image"], mime_type="image/jpeg"))
+                    logger.info(f"Sending text to Gemini: {text}" + (" [+ image]" if item.get("image") else ""))
+                    await self.session.send_client_content(
+                        turns=types.Content(role="user", parts=parts),
+                        turn_complete=True,
+                    )
+                elif "image" in item:
+                    # Live camera feed frame (camera button on).
+                    await self.session.send_realtime_input(
+                        video=types.Blob(data=item["image"], mime_type="image/jpeg")
+                    )
+
         except asyncio.CancelledError:
             logger.info("Sender loop cancelled")
             pass
@@ -1580,6 +2120,50 @@ Meal Logging:
         )
         logger.debug(f"[pan] Sent delta={delta} to {group_name}")
 
+    async def _request_camera_frame(self, timeout: float = CAMERA_SNAPSHOT_TIMEOUT_S):
+        """Ask the app for one fresh camera frame; returns JPEG bytes or None."""
+        fut = asyncio.get_running_loop().create_future()
+        self._frame_waiters.append(fut)
+        try:
+            await self.send(bytes_data=b"\x02" + json.dumps({"type": "capture_frame"}).encode("utf-8"))
+            return await asyncio.wait_for(fut, timeout)
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.warning(f"[camera] snapshot request failed: {e or 'timed out'}")
+            return None
+        finally:
+            if fut in self._frame_waiters:
+                self._frame_waiters.remove(fut)
+
+    async def handle_view_camera(self, args: dict, fc_id):
+        """
+        'view_camera' tool: grab a snapshot from the app (even with the feed off)
+        and show it to the model. Measured on 3.8 Live: an image sent alongside a
+        tool response is ignored (the model guesses), but one sent as the next
+        client turn is read correctly. So: answer the call first, then send the
+        image as its own turn.
+        """
+        reason = (args or {}).get("reason", "")
+        logger.info(f"[view_camera] requested ({reason!r})")
+        jpeg = await self._request_camera_frame()
+        if jpeg is None:
+            result = {"success": False, "error": "The camera did not return an image (camera off or not ready). Ask the patient to check the camera."}
+        else:
+            result = {"success": True, "status": "Snapshot taken; the image follows in the next message."}
+        if fc_id and self.session:
+            try:
+                await self.session.send_tool_response(
+                    function_responses=[types.FunctionResponse(id=fc_id, name="view_camera", response=result)]
+                )
+            except Exception as exc:
+                logger.error(f"[view_camera] Failed to send tool response: {exc}")
+                return
+        if jpeg is not None:
+            await self.input_queue.put({
+                "text": "[Camera snapshot from view_camera]",
+                "image": jpeg,
+            })
+            logger.info(f"[view_camera] snapshot sent ({len(jpeg) // 1024} KB)")
+
     async def handle_adjust_camera(self, command: str, fc_id):
         """
         Manual pan entry point called when the Live AI invokes 'adjust_camera'.
@@ -1620,6 +2204,11 @@ Decision guide:
   Ambiguous with frame available → inspect the frame and decide.
 
 Respond with ONLY the JSON object, nothing else."""
+
+            # The orchestrator needs to see the scene: with the live feed off there
+            # is no recent frame, so take a snapshot first.
+            if time.monotonic() - self._latest_frame_at > CAMERA_FRAME_FRESH_S:
+                await self._request_camera_frame(timeout=3.0)
 
             # Build contents: system prompt first, then optional image, then command
             if getattr(self, 'latest_frame_b64', None):
