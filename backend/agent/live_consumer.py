@@ -141,6 +141,10 @@ STT_SCRIPT_LANGS = {
     "TAMIL": "tam",
     "DEVANAGARI": "hin",
 }
+# Neighbouring scripts STT sometimes picks for Malayalam speech (e.g.
+# 'ఏది model అనుకుంటున్నారు?'). Gemini can still read them, so such transcripts
+# are passed through, but they never become the STT language hint.
+STT_PASSTHROUGH_SCRIPTS = {"TELUGU", "KANNADA"}
 
 # Barge-in echo filter: if at least this fraction of the words in a barge-in
 # snippet appear in what the AI is currently saying, the mic most likely picked
@@ -700,21 +704,27 @@ class GeminiLiveConsumer(AsyncWebsocketConsumer):
         keeps English loanwords in Latin script, so the Malayalam majority wins.
         """
         counts = {}
+        passthrough = 0
         foreign = 0
         for ch in text:
             if ch.isalpha():
                 script = unicodedata.name(ch, "").split(" ", 1)[0]
                 if script in STT_SCRIPT_LANGS:
                     counts[script] = counts.get(script, 0) + 1
+                elif script in STT_PASSTHROUGH_SCRIPTS:
+                    passthrough += 1
                 else:
                     foreign += 1
-        if not counts or foreign > sum(counts.values()):
+        known = sum(counts.values()) + passthrough
+        if not known or foreign > known:
             return None
+        if not counts or passthrough > sum(counts.values()):
+            return "pass"  # readable, but not a language to hint STT with
         return STT_SCRIPT_LANGS[max(counts, key=counts.get)]
 
     def _update_lang_hint(self, text: str):
         lang = self._script_lang(text)
-        if lang and lang != self._lang_hint:
+        if lang and lang != "pass" and lang != self._lang_hint:
             logger.info(f"STT language hint → {lang}")
             self._lang_hint = lang
 
@@ -1275,7 +1285,8 @@ Rules:
 - Use the 'record_vital_reading' tool to save health data.
 - Time: the patient is in India (IST). Every message you receive starts with a "[Time now: ...]" tag added by the system with the current IST time; always use the latest tag for anything time-related (greetings, "what time is it", medication timing). Never read the tag aloud or mention it.
 - When you have a free moment in the conversation, check if there are any medications to be taken and whether the last dose was taken.
-- A message starting with [UNCLEAR_AUDIO] means the patient spoke but the speech could not be recognised. Do not guess what they said; briefly and kindly ask them to repeat it.
+- The patient's words reach you through automatic speech recognition, which often mishears words, especially Malayalam mixed with English, so some messages will be partly garbled. Never reply only that you did not understand. Work out the most likely meaning from the words you can recognise and the conversation so far, and respond to that. If you are unsure, say what you think they meant and check (for example "Did you mean you just woke up?"). For anything important (medicines, symptoms, readings), always confirm what you understood. Text in Telugu or Kannada script is the patient's Malayalam transcribed in the wrong script: read it for its meaning.
+- A message starting with [UNCLEAR_AUDIO] means the patient spoke but no words could be recognised at all; briefly and kindly ask them to repeat it.
 
 Activity Logging (IMPORTANT):
 - CRITICAL — DO NOT RE-LOG HISTORY: The "Recent conversation history" section below is
